@@ -1,0 +1,27 @@
+{
+  "name": "localtunnel-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "LocalTunnel — expose home services to the public internet through your own VPS, even behind CGNAT.",
+  "workspaces": [
+    "packages/protocol",
+    "packages/gateway",
+    "packages/agent",
+    "packages/desktop"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build -w @localtunnel/protocol && npm run build -w @localtunnel/gateway && npm run build -w @localtunnel/agent",
+    "build:desktop": "npm run build -w @localtunnel/desktop",
+    "test": "npm run build && node --test packages/protocol/test/*.test.js packages/gateway/test/*.test.js",
+    "e2e": "npm run build && node --test packages/gateway/test/e2e.test.js",
+    "dev:gateway": "node packages/gateway/dist/main/index.js",
+    "desktop": "npm run start -w @localtunnel/desktop"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
