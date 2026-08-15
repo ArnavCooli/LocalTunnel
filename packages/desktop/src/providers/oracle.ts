@@ -181,7 +181,7 @@ export const ORACLE_STEPS: WizardStep[] = [
       },
       {
         problem: 'macOS says the key file is not secure.',
-        fix: 'Run `chmod 600` on the downloaded file. LocalTunnel does not require this, but ssh on the command line does.',
+        fix: 'LocalTunnel tightens the permissions on a downloaded key (chmod 600) as soon as you select it, so ssh on the command line accepts it too. If it still complains, the file is probably owned by another user — copy it into your own home folder and select the copy.',
       },
     ],
   },

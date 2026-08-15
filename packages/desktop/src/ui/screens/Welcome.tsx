@@ -1,4 +1,5 @@
 import React from 'react';
+import { Cloud, BareMetalServer_01 as Server, Search } from '@carbon/icons-react';
 import { PROVIDERS } from '../../providers/catalog.js';
 import { Choice, ExternalLink } from '../components.js';
 
@@ -67,7 +68,7 @@ export function Welcome({
           Recommended
         </div>
         <Choice
-          icon="☁️"
+          icon={<Cloud size={24} />}
           title="Set up Oracle Cloud"
           description="Free forever. A guided walkthrough of every screen, from sign-up to a live HTTPS site."
           onClick={() => onChoose('oracle')}
@@ -77,13 +78,13 @@ export function Welcome({
           Already have a server?
         </div>
         <Choice
-          icon="🖥"
+          icon={<Server size={24} />}
           title="I already have a VPS"
           description="Enter its address and SSH key — LocalTunnel installs the gateway for you."
           onClick={() => onChoose('existing')}
         />
         <Choice
-          icon="🔎"
+          icon={<Search size={24} />}
           title="Choose another provider"
           description={`DigitalOcean, Vultr, Hetzner, AWS and ${PROVIDERS.length - 3} more.`}
           onClick={() => onChoose('other')}

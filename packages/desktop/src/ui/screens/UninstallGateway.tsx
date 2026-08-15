@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { CheckmarkFilled, CircleDash, DotMark as DotIcon, ErrorFilled, FolderOpen, Key, Password } from '@carbon/icons-react';
 import { api } from '../api.js';
 import { Alert, Choice, Field, Modal } from '../components.js';
 import type { SshCredentials } from '../../setup/ssh-keys.js';
@@ -143,7 +144,7 @@ export function UninstallGateway({
           <>
             {credentials.agent.available && (
               <Choice
-                icon="🔐"
+                icon={<Password size={24} />}
                 title="Use my SSH agent"
                 description={`${credentials.agent.identities.length} key(s) loaded`}
                 selected={auth.kind === 'agent'}
@@ -153,7 +154,7 @@ export function UninstallGateway({
             {credentials.keys.map((key) => (
               <Choice
                 key={key.path}
-                icon="🗝"
+                icon={<Key size={24} />}
                 title={shorten(key.path, credentials.home)}
                 description={`${key.type} · ${key.encrypted ? 'passphrase required' : 'no passphrase'}`}
                 selected={auth.kind === 'file' && auth.path === key.path}
@@ -161,7 +162,7 @@ export function UninstallGateway({
               />
             ))}
             <Choice
-              icon="📂"
+              icon={<FolderOpen size={24} />}
               title="Choose a different key file…"
               description="If the key is not in ~/.ssh"
               selected={auth.kind === 'file' && !credentials.keys.some((k) => k.path === auth.path)}

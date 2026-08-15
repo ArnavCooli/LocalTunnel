@@ -9,7 +9,8 @@ import {
   type ServiceView,
   type TunnelStatus,
 } from './api.js';
-import { Dot, Toast } from './components.js';
+import { Toast } from './components.js';
+import { AppSidebar, type Tab } from './components/app-sidebar.js';
 import { Welcome } from './screens/Welcome.js';
 import { OracleWizard, ProviderPicker, ProviderSetup } from './screens/OracleWizard.js';
 import { Home } from './screens/Home.js';
@@ -21,7 +22,6 @@ import { Diagnostics } from './screens/Diagnostics.js';
 import { Settings } from './screens/Settings.js';
 import { UninstallGateway } from './screens/UninstallGateway.js';
 
-type Tab = 'home' | 'services' | 'machines' | 'gateways' | 'domains' | 'diagnostics' | 'settings';
 type SetupRoute =
   | { kind: 'none' }
   | { kind: 'welcome' }
@@ -29,16 +29,6 @@ type SetupRoute =
   | { kind: 'picker' }
   /** `from` is where Back should return to — the screen the user actually came from. */
   | { kind: 'provider'; providerId: string; from: 'welcome' | 'picker' };
-
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: 'home', label: 'Overview', icon: '◉' },
-  { id: 'services', label: 'Services', icon: '⬡' },
-  { id: 'machines', label: 'Machines', icon: '▣' },
-  { id: 'gateways', label: 'Gateways', icon: '☁' },
-  { id: 'domains', label: 'Domains', icon: '⌂' },
-  { id: 'diagnostics', label: 'Diagnostics', icon: '✓' },
-  { id: 'settings', label: 'Settings', icon: '⚙' },
-];
 
 export function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -222,34 +212,16 @@ export function App() {
             ? `${degraded.length} services need attention`
             : 'All systems online';
 
+  const healthTone = online ? 'green' : gatewayStatus?.ok ? 'amber' : 'red';
+
   return (
-    <div className="shell">
-      <nav className="sidebar">
-        <div className="brand">
-          <span className="brand-mark" />
-          LocalTunnel
-        </div>
-        <div className="nav">
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              className={`nav-item${tab === item.id ? ' active' : ''}`}
-              onClick={() => setTab(item.id)}
-            >
-              <span style={{ width: 15, textAlign: 'center', opacity: 0.75 }}>{item.icon}</span>
-              {item.label}
-              {item.id === 'services' && services.length > 0 && <span className="badge">{services.length}</span>}
-              {item.id === 'machines' && machines.length > 0 && <span className="badge">{machines.length}</span>}
-            </button>
-          ))}
-        </div>
-        <div className="sidebar-foot">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <Dot tone={online ? 'green' : gatewayStatus?.ok ? 'amber' : 'red'} />
-            {healthLabel}
-          </div>
-        </div>
-      </nav>
+    <div className="shell with-rail">
+      <AppSidebar
+        tab={tab}
+        onTabChange={setTab}
+        healthLabel={healthLabel}
+        healthTone={healthTone}
+      />
 
       <main className="main">
         {tab === 'home' && (

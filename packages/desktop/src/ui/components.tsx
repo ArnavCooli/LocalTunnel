@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Locked, Plug, Satellite, Wikis } from '@carbon/icons-react';
 import { api } from './api.js';
 
 /** Shared building blocks, kept in one file so the screens stay readable. */
@@ -105,7 +106,7 @@ export function Choice({
   selected,
   onClick,
 }: {
-  icon?: string;
+  icon?: React.ReactNode;
   title: string;
   description?: string;
   selected?: boolean;
@@ -217,11 +218,16 @@ export function usePolling<T>(
   return { data, error, loading, refresh: () => setNonce((n) => n + 1) };
 }
 
-export const SERVICE_ICONS: Record<string, string> = {
-  http: '🌐',
-  https: '🔒',
-  tcp: '🔌',
-  udp: '📡',
+/**
+ * Line icons rather than emoji: emoji are full-colour images that ignore the
+ * text colour around them, which reads as clip-art against the black chrome.
+ * These are the same Carbon set the sidebar rail uses.
+ */
+export const SERVICE_ICONS: Record<string, React.ReactNode> = {
+  http: <Wikis size={20} />,
+  https: <Locked size={20} />,
+  tcp: <Plug size={20} />,
+  udp: <Satellite size={20} />,
 };
 
 export function serviceStatusTone(status: string): 'green' | 'amber' | 'red' | 'grey' {

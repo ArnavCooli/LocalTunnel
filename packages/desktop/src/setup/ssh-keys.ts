@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { utils } from 'ssh2';
 
@@ -149,6 +149,41 @@ export function detectKeyFiles(dir = join(homedir(), '.ssh')): DetectedKey[] {
     };
     return rank(a) - rank(b) || a.path.localeCompare(b.path);
   });
+}
+
+/** Whether `path` lives inside the given directory (default ~/.ssh). */
+function isInside(path: string, dir: string): boolean {
+  const rel = relative(resolve(dir), resolve(path));
+  return rel !== '' && !rel.startsWith('..') && !rel.startsWith(`${sep}..`) && !rel.includes(`${sep}..${sep}`);
+}
+
+/**
+ * Tighten a key file's permissions to 600 when it lives outside ~/.ssh.
+ *
+ * Provider-generated keys land in Downloads world-readable, which ssh refuses to
+ * use ("UNPROTECTED PRIVATE KEY FILE"). LocalTunnel itself does not care, but the
+ * user will hit this the moment they run ssh by hand, so fix it for them. Keys
+ * already in ~/.ssh are left alone: that directory is the user's to manage, and
+ * anything in it was almost certainly created with the right mode already.
+ */
+export function secureKeyFile(path: string, sshDir = join(homedir(), '.ssh')): boolean {
+  // Windows has no POSIX mode bits; ssh there uses ACLs, which chmod cannot set.
+  if (platform() === 'win32') return false;
+  if (!path || !existsSync(path)) return false;
+  if (isInside(path, sshDir)) return false;
+
+  try {
+    const stats = statSync(path);
+    if (!stats.isFile()) return false;
+    // Only act when group/other can see it — never loosen what is already tight.
+    if ((stats.mode & 0o077) === 0) return false;
+    chmodSync(path, 0o600);
+    return true;
+  } catch {
+    // Not ours to chmod (another user's file, read-only volume) — the install can
+    // still proceed, since LocalTunnel only needs to read the key.
+    return false;
+  }
 }
 
 function guessType(contents: string): string {

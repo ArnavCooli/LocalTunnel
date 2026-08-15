@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Cloud } from '@carbon/icons-react';
 import { ORACLE_REQUIRED_PORTS, ORACLE_STEPS } from '../../providers/oracle.js';
 import { PROVIDERS, providerById } from '../../providers/catalog.js';
 import { Alert, Choice, Copyable, ExternalLink } from '../components.js';
@@ -208,7 +209,7 @@ export function ProviderPicker({
       {PROVIDERS.filter((p) => p.recommended).map((provider) => (
         <Choice
           key={provider.id}
-          icon="☁️"
+          icon={<Cloud size={24} />}
           title={provider.name}
           description={`${provider.tagline} — ${provider.cost}`}
           onClick={() => onPick(provider.id)}

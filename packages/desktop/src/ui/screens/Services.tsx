@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Api, GameConsole, Plug, Satellite, Terminal, Wikis } from '@carbon/icons-react';
 import {
   api,
   formatBytes,
@@ -23,13 +24,13 @@ import { DnsInstructions } from './Domains.js';
 
 type ServiceKind = 'website' | 'api' | 'minecraft' | 'ssh' | 'tcp' | 'udp';
 
-const KINDS: { id: ServiceKind; icon: string; title: string; description: string; type: 'http' | 'tcp' | 'udp'; port?: number }[] = [
-  { id: 'website', icon: '🌐', title: 'Website', description: 'A web app or site on a local port.', type: 'http', port: 3000 },
-  { id: 'api', icon: '⚙️', title: 'API', description: 'An HTTP API or webhook receiver.', type: 'http', port: 8080 },
-  { id: 'minecraft', icon: '🎮', title: 'Minecraft', description: 'A Java Edition server.', type: 'tcp', port: 25565 },
-  { id: 'ssh', icon: '🔑', title: 'SSH', description: 'Remote shell access to this computer.', type: 'tcp', port: 22 },
-  { id: 'tcp', icon: '🔌', title: 'Custom TCP', description: 'Any other TCP service.', type: 'tcp' },
-  { id: 'udp', icon: '📡', title: 'Custom UDP', description: 'Bedrock Minecraft, game servers, and similar.', type: 'udp', port: 19132 },
+const KINDS: { id: ServiceKind; icon: React.ReactNode; title: string; description: string; type: 'http' | 'tcp' | 'udp'; port?: number }[] = [
+  { id: 'website', icon: <Wikis size={24} />, title: 'Website', description: 'A web app or site on a local port.', type: 'http', port: 3000 },
+  { id: 'api', icon: <Api size={24} />, title: 'API', description: 'An HTTP API or webhook receiver.', type: 'http', port: 8080 },
+  { id: 'minecraft', icon: <GameConsole size={24} />, title: 'Minecraft', description: 'A Java Edition server.', type: 'tcp', port: 25565 },
+  { id: 'ssh', icon: <Terminal size={24} />, title: 'SSH', description: 'Remote shell access to this computer.', type: 'tcp', port: 22 },
+  { id: 'tcp', icon: <Plug size={24} />, title: 'Custom TCP', description: 'Any other TCP service.', type: 'tcp' },
+  { id: 'udp', icon: <Satellite size={24} />, title: 'Custom UDP', description: 'Bedrock Minecraft, game servers, and similar.', type: 'udp', port: 19132 },
 ];
 
 export function Services({

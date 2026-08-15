@@ -5,7 +5,7 @@ import { AppStore } from '../services/store.js';
 import { AgentSupervisor, defaultSocketPath } from '../services/agent-supervisor.js';
 import { gatewayApi, type GatewayConnection } from '../services/gateway-client.js';
 import { GatewayInstaller, INSTALL_STEPS, uninstallGateway, type InstallEvent } from '../setup/installer.js';
-import { detectSshCredentials } from '../setup/ssh-keys.js';
+import { detectSshCredentials, secureKeyFile } from '../setup/ssh-keys.js';
 import { runDiagnostics } from '../diagnostics/engine.js';
 
 let window: BrowserWindow | null = null;
@@ -182,7 +182,11 @@ function registerIpc(): void {
       properties: ['openFile', 'showHiddenFiles'],
       message: 'Select the private key file your VPS provider gave you.',
     });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled) return null;
+    const path = result.filePaths[0];
+    // A key downloaded from a provider arrives world-readable; ssh refuses those.
+    secureKeyFile(path);
+    return path;
   });
 
   /* ------------------------------------------------------------ gateways */

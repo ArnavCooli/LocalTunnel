@@ -1,4 +1,5 @@
 import React from 'react';
+import { Locked, Warning, WarningAlt } from '@carbon/icons-react';
 import {
   formatBytes,
   type GatewayStatusResult,
@@ -64,7 +65,13 @@ export function Home({
       <div className={`hero is-${health}`}>
         <div className="hero-head">
           <span className="hero-badge">
-            {health === 'online' ? '🔒' : health === 'warning' ? '⚠️' : '⛔️'}
+            {health === 'online' ? (
+              <Locked size={24} />
+            ) : health === 'warning' ? (
+              <Warning size={24} />
+            ) : (
+              <WarningAlt size={24} />
+            )}
           </span>
           <span>
             <span className="hero-title">{headline}</span>

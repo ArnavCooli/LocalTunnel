@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { CheckmarkFilled, CircleDash, DotMark as DotIcon, ErrorFilled, FolderOpen, Key, Password } from '@carbon/icons-react';
 import { api, type InstallProgress } from '../api.js';
 import { Alert, Choice, Field } from '../components.js';
 import { providerById } from '../../providers/catalog.js';
@@ -162,7 +163,7 @@ export function InstallGateway({
           <>
             {credentials.agent.available && (
               <Choice
-                icon="🔐"
+                icon={<Password size={24} />}
                 title="Use my SSH agent"
                 description={`${credentials.agent.identities.length} key${credentials.agent.identities.length === 1 ? '' : 's'} loaded — ${credentials.agent.identities[0]}. Your private key stays in the agent; LocalTunnel never reads it.`}
                 selected={auth.kind === 'agent'}
@@ -172,7 +173,7 @@ export function InstallGateway({
             {credentials.keys.map((key) => (
               <Choice
                 key={key.path}
-                icon="🗝"
+                icon={<Key size={24} />}
                 title={shorten(key.path, credentials.home)}
                 description={[
                   key.type,
@@ -184,7 +185,7 @@ export function InstallGateway({
               />
             ))}
             <Choice
-              icon="📂"
+              icon={<FolderOpen size={24} />}
               title="Choose a different key file…"
               description="For a key downloaded from your provider that is not in ~/.ssh yet."
               selected={auth.kind === 'file' && !credentials.keys.some((k) => k.path === auth.path)}
@@ -251,7 +252,15 @@ export function InstallGateway({
             {steps.map((step) => (
               <div key={step.key} className={`step ${step.state}`}>
                 <span className="step-icon">
-                  {step.state === 'done' ? '✓' : step.state === 'failed' ? '✗' : step.state === 'running' ? '⟳' : '·'}
+                  {step.state === 'done' ? (
+                    <CheckmarkFilled size={16} />
+                  ) : step.state === 'failed' ? (
+                    <ErrorFilled size={16} />
+                  ) : step.state === 'running' ? (
+                    <CircleDash size={16} />
+                  ) : (
+                    <DotIcon size={16} />
+                  )}
                 </span>
                 <span>{step.label}</span>
               </div>

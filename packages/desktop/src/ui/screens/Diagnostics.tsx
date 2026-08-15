@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { CheckmarkFilled, CircleDash, ErrorFilled, WarningFilled } from '@carbon/icons-react';
 import { api, type CheckResult, type ServiceView } from '../api.js';
 import { Alert, Spinner } from '../components.js';
 
@@ -84,7 +85,7 @@ export function Diagnostics({
       {results?.map((check) => (
         <div className="card" key={check.id}>
           <div className="card-head">
-            <span style={{ width: 16 }}>{icon(check.state)}</span>
+            <span className={`check-icon ${check.state}`}>{icon(check.state)}</span>
             <span className="card-title">{check.label}</span>
           </div>
           <div style={{ color: check.state === 'fail' ? 'var(--text)' : 'var(--text-secondary)' }}>{check.detail}</div>
@@ -121,16 +122,16 @@ export function Diagnostics({
   );
 }
 
-function icon(state: CheckResult['state']): string {
+function icon(state: CheckResult['state']): React.ReactNode {
   switch (state) {
     case 'pass':
-      return '✓';
+      return <CheckmarkFilled size={16} />;
     case 'fail':
-      return '✗';
+      return <ErrorFilled size={16} />;
     case 'warn':
-      return '!';
+      return <WarningFilled size={16} />;
     default:
-      return '·';
+      return <CircleDash size={16} />;
   }
 }
 

@@ -21,27 +21,61 @@
     "ssh2": "^1.15.0"
   },
   "devDependencies": {
+    "@carbon/icons-react": "^11.86.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/ssh2": "^1.15.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "clsx": "^2.1.1",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "lucide-react": "^1.31.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3",
     "vite": "^5.4.11"
   },
   "build": {
     "appId": "com.localtunnel.desktop",
     "productName": "LocalTunnel",
-    "files": ["dist/**/*", "node_modules/**/*"],
-    "extraResources": [
-      { "from": "../agent/dist", "to": "agent/dist" },
-      { "from": "../../build/localtunnel-gateway.tar.gz", "to": "gateway/localtunnel-gateway.tar.gz" },
-      { "from": "../../installer", "to": "installer" }
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*"
     ],
-    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"] },
-    "win": { "target": ["nsis"] },
-    "linux": { "target": ["AppImage", "deb"], "category": "Network" }
+    "extraResources": [
+      {
+        "from": "../agent/dist",
+        "to": "agent/dist"
+      },
+      {
+        "from": "../../build/localtunnel-gateway.tar.gz",
+        "to": "gateway/localtunnel-gateway.tar.gz"
+      },
+      {
+        "from": "../../installer",
+        "to": "installer"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network"
+    }
   }
 }

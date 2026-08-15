@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { Client, type ConnectConfig } from 'ssh2';
-import { agentSocket } from './ssh-keys.js';
+import { agentSocket, secureKeyFile } from './ssh-keys.js';
 
 /**
  * Installs the gateway on the user's VPS over SSH.
@@ -192,6 +192,9 @@ export class GatewayInstaller extends EventEmitter {
       // may be set — ssh2 will try the agent first and fall back to the key.
       if (target.useAgent) config.agent = agentSocket() ?? undefined;
       if (target.privateKeyPath) {
+        // Keys kept outside ~/.ssh (a provider download, say) are usually left
+        // world-readable; tighten them so plain `ssh` works with them later too.
+        secureKeyFile(target.privateKeyPath);
         config.privateKey = readFileSync(target.privateKeyPath);
         config.passphrase = target.passphrase;
       }
@@ -487,6 +490,7 @@ export function uninstallGateway(
     };
     if (target.useAgent) config.agent = agentSocket() ?? undefined;
     if (target.privateKeyPath) {
+      secureKeyFile(target.privateKeyPath);
       config.privateKey = readFileSync(target.privateKeyPath);
       config.passphrase = target.passphrase;
     }
