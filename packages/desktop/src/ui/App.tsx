@@ -263,6 +263,7 @@ export function App() {
               setTab('services');
             }}
             onDiagnose={() => setTab('diagnostics')}
+            onConnect={() => setTab('machines')}
           />
         )}
         {tab === 'services' && (
