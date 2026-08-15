@@ -87,7 +87,7 @@ export function Diagnostics({
             <span style={{ width: 16 }}>{icon(check.state)}</span>
             <span className="card-title">{check.label}</span>
           </div>
-          <div style={{ color: check.state === 'fail' ? 'var(--text)' : 'var(--text-dim)' }}>{check.detail}</div>
+          <div style={{ color: check.state === 'fail' ? 'var(--text)' : 'var(--text-secondary)' }}>{check.detail}</div>
 
           {check.facts && (
             <table className="record-table" style={{ marginTop: 10 }}>
@@ -107,12 +107,12 @@ export function Diagnostics({
               style={{
                 marginTop: 12,
                 paddingTop: 12,
-                borderTop: '1px solid var(--border-soft)',
-                fontSize: 13,
+                borderTop: '1px solid var(--hairline)',
+                fontSize: 'var(--text-body)',
               }}
             >
               <strong style={{ display: 'block', marginBottom: 3 }}>Fix</strong>
-              <span style={{ color: 'var(--text-dim)' }}>{check.fix}</span>
+              <span style={{ color: 'var(--text-secondary)' }}>{check.fix}</span>
             </div>
           )}
         </div>

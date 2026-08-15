@@ -18,6 +18,13 @@ export interface GatewayProfile {
   provider: string;
   region: string | null;
   fingerprint: string;
+  /**
+   * The SSH username and port that worked when this gateway was installed, so an
+   * update or uninstall does not make the user remember them again. Neither is a
+   * secret — the private key itself is still never stored.
+   */
+  sshUsername?: string;
+  sshPort?: number;
   /** Encrypted with the OS keychain when available; plaintext only as a fallback. */
   adminTokenCipher: string;
   adminTokenPlain?: string;

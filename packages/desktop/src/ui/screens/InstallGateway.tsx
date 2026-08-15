@@ -24,19 +24,24 @@ function shorten(path: string, home: string): string {
 export function InstallGateway({
   providerId,
   defaultHost,
+  defaultUsername,
+  defaultPort,
   onInstalled,
   onCancel,
 }: {
   providerId: string;
   defaultHost?: string;
+  /** Known from a previous install; beats guessing from the provider. */
+  defaultUsername?: string | null;
+  defaultPort?: number | null;
   onInstalled: (gateway: { id: string; name: string; host: string }) => void;
   onCancel?: () => void;
 }) {
   const provider = providerById(providerId);
   const [form, setForm] = useState({
     host: defaultHost ?? '',
-    port: '22',
-    username: provider?.defaultUser === 'root' ? 'root' : 'ubuntu',
+    port: String(defaultPort ?? 22),
+    username: defaultUsername || (provider?.defaultUser === 'root' ? 'root' : 'ubuntu'),
     privateKeyPath: '',
     passphrase: '',
     name: provider ? `${provider.name} Gateway` : 'LocalTunnel Gateway',

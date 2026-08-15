@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { api, formatBytes, type GatewayStatusResult, type GatewaySummary } from '../api.js';
 import { Alert, Dot, Empty, Field, Modal } from '../components.js';
 import { providerById } from '../../providers/catalog.js';
+import { InstallGateway } from './InstallGateway.js';
+import { UninstallGateway } from './UninstallGateway.js';
 
 export function Gateways({
   gateways,
@@ -18,6 +20,8 @@ export function Gateways({
 }) {
   const [addingExisting, setAddingExisting] = useState(false);
   const [removing, setRemoving] = useState<GatewaySummary | null>(null);
+  const [updating, setUpdating] = useState<GatewaySummary | null>(null);
+  const [uninstalling, setUninstalling] = useState<GatewaySummary | null>(null);
 
   return (
     <div className="page">
@@ -69,6 +73,9 @@ export function Gateways({
                       Use this one
                     </button>
                   )}
+                  <button className="btn small" onClick={() => setUpdating(gateway)}>
+                    Update
+                  </button>
                   <button className="btn small danger" onClick={() => setRemoving(gateway)}>
                     Remove
                   </button>
@@ -128,7 +135,7 @@ export function Gateways({
                           <td>
                             {port.proto.toUpperCase()} {port.port}
                           </td>
-                          <td style={{ fontFamily: 'inherit', color: 'var(--text-dim)' }}>
+                          <td style={{ fontFamily: 'inherit', color: 'var(--text-secondary)' }}>
                             {port.label} · <Dot tone="green" /> open
                           </td>
                         </tr>
@@ -144,6 +151,45 @@ export function Gateways({
             </div>
           );
         })
+      )}
+
+      {updating && (
+        <Modal title={`Update ${updating.name}`} onClose={() => setUpdating(null)}>
+          <Alert tone="info" title="What an update changes">
+            The gateway program on your server is replaced with the version bundled in this app.
+            Your machines, services, certificates and the gateway's identity are all kept, so
+            enrolled computers keep working and you will not need to re-enrol anything. Services are
+            offline for the few seconds it takes to restart.
+          </Alert>
+          <p className="section-hint">
+            LocalTunnel needs SSH access again — it does not keep your key after installing.
+          </p>
+          <InstallGateway
+            providerId={updating.provider}
+            defaultHost={updating.host}
+            defaultUsername={updating.sshUsername}
+            defaultPort={updating.sshPort}
+            onInstalled={() => {
+              setUpdating(null);
+              onChanged();
+              notify('Gateway updated.');
+            }}
+            onCancel={() => setUpdating(null)}
+          />
+        </Modal>
+      )}
+
+      {uninstalling && (
+        <UninstallGateway
+          gateway={uninstalling}
+          onClose={() => setUninstalling(null)}
+          onDone={(removed) => {
+            setUninstalling(null);
+            onChanged();
+            notify(removed ? 'Gateway removed from your server.' : 'The server was not fully cleaned up.',
+              removed ? 'info' : 'error');
+          }}
+        />
       )}
 
       {addingExisting && (
@@ -174,6 +220,16 @@ export function Gateways({
               }}
             >
               Remove from LocalTunnel
+            </button>
+            <button
+              className="btn danger"
+              onClick={() => {
+                const target = removing;
+                setRemoving(null);
+                setUninstalling(target);
+              }}
+            >
+              Also remove it from the server…
             </button>
             <button className="btn ghost" onClick={() => setRemoving(null)}>
               Cancel

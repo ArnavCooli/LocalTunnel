@@ -67,6 +67,8 @@ export class IngressServer {
       requestCert: true,
       rejectUnauthorized: false,
       minVersion: 'TLSv1.2',
+      // Advertise only what the proxy can actually serve. Both are real here:
+      // h2 sockets go to an HTTP/2 server, everything else to the HTTP/1.1 one.
       ALPNProtocols: [ALPN.tunnel, ALPN.enroll, ALPN.admin, 'h2', 'http/1.1'],
       SNICallback: (servername, callback) => {
         const context = certificates.contextFor(servername);
@@ -149,7 +151,10 @@ export class IngressServer {
         }
         socket.setTimeout(config.limits.idleConnectionTimeoutMs, () => socket.destroy());
         socket.once('close', () => connections.release(ip));
-        this.deps.proxy.handle(socket);
+        // TLS has already negotiated the protocol, so the socket carries either an
+        // HTTP/2 preface or an HTTP/1.1 request line.
+        if (socket.alpnProtocol === 'h2') this.deps.proxy.handleH2(socket);
+        else this.deps.proxy.handle(socket);
       }
     }
   }

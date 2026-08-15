@@ -19,6 +19,7 @@ import { Gateways } from './screens/Gateways.js';
 import { Domains } from './screens/Domains.js';
 import { Diagnostics } from './screens/Diagnostics.js';
 import { Settings } from './screens/Settings.js';
+import { UninstallGateway } from './screens/UninstallGateway.js';
 
 type Tab = 'home' | 'services' | 'machines' | 'gateways' | 'domains' | 'diagnostics' | 'settings';
 type SetupRoute =
@@ -30,7 +31,7 @@ type SetupRoute =
   | { kind: 'provider'; providerId: string; from: 'welcome' | 'picker' };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: 'home', label: 'Home', icon: '◉' },
+  { id: 'home', label: 'Overview', icon: '◉' },
   { id: 'services', label: 'Services', icon: '⬡' },
   { id: 'machines', label: 'Machines', icon: '▣' },
   { id: 'gateways', label: 'Gateways', icon: '☁' },
@@ -51,6 +52,13 @@ export function App() {
   const [agentStatus, setAgentStatus] = useState<TunnelStatus | null>(null);
   const [diagnoseServiceId, setDiagnoseServiceId] = useState<string | null>(null);
   const [openServiceId, setOpenServiceId] = useState<string | null>(null);
+  const [cleanupTarget, setCleanupTarget] = useState<{
+    id: string;
+    name: string;
+    host: string;
+    sshUsername?: string | null;
+    sshPort?: number;
+  } | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: 'info' | 'error' } | null>(null);
   /** True until the first load decides which screen to show, to avoid a flash of Home. */
   const [initializing, setInitializing] = useState(true);
@@ -58,6 +66,19 @@ export function App() {
 
   const notify = useCallback((message: string, tone: 'info' | 'error' = 'info') => {
     setToast({ message, tone });
+  }, []);
+
+  /** Put the app back to first launch after a reset. */
+  const resetToWelcome = useCallback(() => {
+    routed.current = false;
+    setGateways([]);
+    setServices([]);
+    setMachines([]);
+    setCertificates([]);
+    setGatewayStatus(null);
+    setAgentStatus(null);
+    setTab('home');
+    setSetup({ kind: 'welcome' });
   }, []);
 
   /** One refresh path for everything that comes from the gateway. */
@@ -292,22 +313,39 @@ export function App() {
             state={state}
             onChanged={() => void refresh()}
             notify={notify}
+            gatewayForCleanup={
+              gateways[0]
+                ? {
+                    id: gateways[0].id,
+                    name: gateways[0].name,
+                    host: gateways[0].host,
+                    sshUsername: gateways[0].sshUsername,
+                    sshPort: gateways[0].sshPort,
+                  }
+                : null
+            }
+            onRequestServerCleanup={(gateway) => setCleanupTarget(gateway)}
             onReset={() => {
-              // Let the next refresh route to Welcome again, as on a fresh install.
-              routed.current = false;
-              setGateways([]);
-              setServices([]);
-              setMachines([]);
-              setCertificates([]);
-              setGatewayStatus(null);
-              setAgentStatus(null);
-              setTab('home');
-              setSetup({ kind: 'welcome' });
+              resetToWelcome();
               void refresh();
             }}
           />
         )}
       </main>
+
+      {cleanupTarget && (
+        <UninstallGateway
+          gateway={cleanupTarget}
+          onClose={() => {
+            setCleanupTarget(null);
+            resetToWelcome();
+          }}
+          onDone={() => {
+            setCleanupTarget(null);
+            resetToWelcome();
+          }}
+        />
+      )}
 
       {toast && <Toast message={toast.message} tone={toast.tone} onDone={() => setToast(null)} />}
     </div>

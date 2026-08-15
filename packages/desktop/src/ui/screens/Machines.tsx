@@ -129,7 +129,7 @@ export function Machines({
             )}
           </>
         ) : (
-          <div style={{ color: 'var(--text-dim)' }}>The LocalTunnel agent is not running.</div>
+          <div style={{ color: 'var(--text-secondary)' }}>The LocalTunnel agent is not running.</div>
         )}
       </div>
 
@@ -162,7 +162,7 @@ export function Machines({
                 )}
               </span>
             </div>
-            <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
+            <div style={{ fontSize: 'var(--text-small)', color: 'var(--text-secondary)' }}>
               {machine.revoked
                 ? 'Revoked'
                 : machine.connected

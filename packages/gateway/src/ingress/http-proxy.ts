@@ -1,9 +1,21 @@
 import http from 'node:http';
+import http2 from 'node:http2';
+import zlib from 'node:zlib';
 import type { Duplex } from 'node:stream';
 import type { TunnelStream } from '@localtunnel/protocol';
 import type { Logger } from '../main/log.js';
 import type { ServiceRecord, Store } from '../main/state.js';
 import { TunnelRegistry, TunnelUnavailableError } from '../tunnels/registry.js';
+
+/** Requests and responses arrive over either protocol; the handling is shared. */
+type AnyRequest = http.IncomingMessage | http2.Http2ServerRequest;
+type AnyResponse = http.ServerResponse | http2.Http2ServerResponse;
+
+/** How long the local service has to respond before the visitor gets a 504. */
+const UPSTREAM_TIMEOUT_MS = 60_000;
+
+/** Only worth compressing text; images and archives are already compressed. */
+const COMPRESSIBLE = /^(text\/|application\/(json|javascript|xml|xhtml|rss|atom|manifest|wasm)|image\/svg)/i;
 
 const HOP_BY_HOP = new Set([
   'connection',
@@ -30,6 +42,7 @@ export interface HttpProxyOptions {
  */
 export class HttpProxy {
   private server: http.Server;
+  private h2Server: http2.Http2Server;
 
   constructor(private readonly options: HttpProxyOptions) {
     this.server = http.createServer({ keepAliveTimeout: 30_000 });
@@ -38,6 +51,19 @@ export class HttpProxy {
     this.server.on('clientError', (_err, socket) => {
       if (!socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     });
+
+    /*
+     * HTTP/2. TLS has already run, so a cleartext h2 server is exactly right: what
+     * arrives on the socket after the handshake is the h2 preface either way.
+     * The compatibility API gives the same req/res shape as HTTP/1.1, so one
+     * request path serves both.
+     */
+    this.h2Server = http2.createServer({ settings: { enablePush: false } });
+    this.h2Server.on('request', (req, res) => void this.onRequest(req, res));
+    this.h2Server.on('sessionError', () => {
+      /* a broken client should not take the gateway down */
+    });
+    this.h2Server.on('clientError', (_err, socket) => socket.destroy());
   }
 
   /** Hand over a socket that has already completed TLS (or plain :80 traffic). */
@@ -45,15 +71,22 @@ export class HttpProxy {
     this.server.emit('connection', socket);
   }
 
-  private resolve(req: http.IncomingMessage): ServiceRecord | null {
-    const host = (req.headers.host ?? '').split(':')[0].toLowerCase();
+  /** The same, for a socket whose ALPN negotiated HTTP/2. */
+  handleH2(socket: Duplex): void {
+    this.h2Server.emit('connection', socket);
+  }
+
+  private resolve(req: AnyRequest): ServiceRecord | null {
+    // HTTP/2 carries the target in :authority; HTTP/1.1 in Host.
+    const authority = (req.headers[':authority'] as string | undefined) ?? req.headers.host ?? '';
+    const host = authority.split(':')[0].toLowerCase();
     if (!host) return null;
     const service = this.options.store.serviceByHostname(host);
     if (!service) return null;
     return service.type === 'http' || service.type === 'https' ? service : null;
   }
 
-  private async onRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async onRequest(req: AnyRequest, res: AnyResponse): Promise<void> {
     const { store, registry, log } = this.options;
     const service = this.resolve(req);
 
@@ -88,6 +121,7 @@ export class HttpProxy {
       {
         method: req.method,
         path: req.url,
+        timeout: UPSTREAM_TIMEOUT_MS,
         headers,
         agent,
         // The agent dials the local service itself; these are placeholders that
@@ -103,8 +137,35 @@ export class HttpProxy {
         if (this.options.hsts) {
           outHeaders['strict-transport-security'] = 'max-age=31536000';
         }
-        res.writeHead(upstreamRes.statusCode ?? 502, outHeaders);
-        upstreamRes.pipe(res);
+
+        // Compress text on the way out. The tunnel is the narrow part of the
+        // path, so this is the cheapest speed-up available — but never for
+        // already-encoded bodies, and never for server-sent events, which must
+        // not be buffered.
+        const status = upstreamRes.statusCode ?? 502;
+        const contentType = String(upstreamRes.headers['content-type'] ?? '');
+        const compress =
+          /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? '')) &&
+          !upstreamRes.headers['content-encoding'] &&
+          !/text\/event-stream/i.test(contentType) &&
+          COMPRESSIBLE.test(contentType) &&
+          req.method !== 'HEAD' &&
+          status !== 204 &&
+          status !== 304;
+
+        if (compress) {
+          delete outHeaders['content-length'];
+          outHeaders['content-encoding'] = 'gzip';
+          outHeaders.vary = outHeaders.vary ? `${String(outHeaders.vary)}, Accept-Encoding` : 'Accept-Encoding';
+          writeHead(res, status, outHeaders);
+          const gzip = zlib.createGzip();
+          gzip.on('error', () => res.destroy());
+          upstreamRes.pipe(gzip).pipe(res as unknown as NodeJS.WritableStream);
+        } else {
+          writeHead(res, status, outHeaders);
+          upstreamRes.pipe(res as unknown as NodeJS.WritableStream);
+        }
+
         upstreamRes.on('end', () => {
           store.recordResponse(service.id, upstreamRes.statusCode ?? 0);
           store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
@@ -131,7 +192,22 @@ export class HttpProxy {
       stream.destroy();
     });
 
-    req.pipe(upstream);
+    upstream.on('timeout', () => {
+      log.warn('upstream timed out', { serviceId: service.id });
+      store.recordServiceError(service.id);
+      if (!res.headersSent) {
+        respondPage(
+          res,
+          504,
+          'Service timed out',
+          `${service.localHost}:${service.localPort} accepted the connection but did not respond within ${UPSTREAM_TIMEOUT_MS / 1000} seconds.`,
+        );
+      }
+      upstream.destroy();
+      stream.destroy();
+    });
+
+    req.pipe(upstream as unknown as NodeJS.WritableStream);
     res.on('close', () => {
       if (!stream.destroyed) stream.destroy();
     });
@@ -184,6 +260,10 @@ export class HttpProxy {
   }
 }
 
+function writeHead(res: AnyResponse, status: number, headers: http.OutgoingHttpHeaders): void {
+  (res as http.ServerResponse).writeHead(status, headers);
+}
+
 /** An http.Agent that hands the client exactly one pre-made connection. */
 function oneShotAgent(stream: TunnelStream): http.Agent {
   const agent = new http.Agent({ keepAlive: false, maxSockets: 1 });
@@ -191,14 +271,19 @@ function oneShotAgent(stream: TunnelStream): http.Agent {
   return agent;
 }
 
-function forwardHeaders(req: http.IncomingMessage, service: ServiceRecord): http.OutgoingHttpHeaders {
+function forwardHeaders(req: AnyRequest, service: ServiceRecord): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(req.headers)) {
+    // `:method`, `:path`, `:scheme`, `:authority` are HTTP/2 pseudo-headers and are
+    // rejected by an HTTP/1.1 client, so they are translated rather than copied.
+    if (name.startsWith(':')) continue;
     if (!HOP_BY_HOP.has(name.toLowerCase()) && value !== undefined) headers[name] = value;
   }
-  const existingFor = req.headers['x-forwarded-for'];
   const clientIp = remoteIp(req.socket);
-  headers['x-forwarded-for'] = existingFor ? `${existingFor}, ${clientIp}` : clientIp;
+  // Set, never append. A visitor can send any X-Forwarded-For they like, and
+  // appending would let them forge the chain the local app trusts.
+  headers['x-forwarded-for'] = clientIp;
+  headers.host = (req.headers[':authority'] as string | undefined) ?? req.headers.host ?? '';
   headers['x-forwarded-proto'] = 'https';
   headers['x-forwarded-host'] = service.hostname ?? req.headers.host ?? '';
   headers['x-real-ip'] = clientIp;
@@ -224,7 +309,7 @@ function localFailureMessage(service: ServiceRecord, err: Error): string {
 }
 
 /** A plain, self-explanatory error page — never a bare proxy error. */
-function respondPage(res: http.ServerResponse, status: number, title: string, detail: string): void {
+function respondPage(res: AnyResponse, status: number, title: string, detail: string): void {
   const body = `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
@@ -239,7 +324,10 @@ function respondPage(res: http.ServerResponse, status: number, title: string, de
 <h1>${title}</h1><p>${escapeHtml(detail)}</p>
 <span class="tag">LocalTunnel gateway</span>
 </main></body></html>`;
-  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+  writeHead(res, status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
   res.end(body);
 }
 

@@ -46,6 +46,15 @@ export interface GatewayConfig {
     /** Whether the gateway may open/close ports for raw TCP services itself. */
     manage: boolean;
   };
+  /**
+   * Wildcard domain used to mint hostnames for temporary links, e.g. `lt.example.com`
+   * with a `*.lt.example.com` A record pointing at this gateway.
+   *
+   * When null, the gateway falls back to a hostname derived from its own public IP
+   * via sslip.io, which needs no DNS setup at all: `abc123.129.0.0.1.sslip.io`
+   * resolves to 129.0.0.1 for everyone.
+   */
+  temporaryDomain: string | null;
   limits: Limits;
 }
 
@@ -80,6 +89,7 @@ export function defaultConfig(overrides: Partial<GatewayConfig> = {}): GatewayCo
       renewBeforeDays: 30,
     },
     firewall: { manage: true },
+    temporaryDomain: null,
     limits: { ...DEFAULT_LIMITS },
     ...overrides,
   };

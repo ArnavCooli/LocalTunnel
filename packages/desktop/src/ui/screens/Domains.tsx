@@ -49,7 +49,7 @@ export function Domains({
                   </button>
                 </span>
               </div>
-              <div style={{ color: 'var(--text-dim)', fontSize: 13, marginBottom: 10 }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-body)', marginBottom: 10 }}>
                 {service.name} → {service.localHost}:{service.localPort}
               </div>
 
@@ -58,7 +58,23 @@ export function Domains({
                 <Dot tone={cert?.state === 'valid' ? 'green' : cert?.state === 'error' ? 'red' : 'amber'} />
                 <span>{cert ? certLabel(cert) : 'Not issued yet'}</span>
               </div>
-              {cert?.error && <Alert tone="error">{cert.error}</Alert>}
+              {cert?.state === 'pending' && cert.detail && (
+                <Alert tone="info" title="Waiting for DNS">
+                  {cert.detail}
+                  {cert.nextAttemptAt && (
+                    <div style={{ marginTop: 6, color: 'var(--text-tertiary)', fontSize: 'var(--text-small)' }}>
+                      Next check {new Date(cert.nextAttemptAt).toLocaleTimeString()}. You can leave this
+                      window — it carries on in the background.
+                    </div>
+                  )}
+                </Alert>
+              )}
+              {cert?.error && (
+                <Alert tone="warn" title="Could not issue the certificate yet">
+                  {cert.error}
+                  {cert.detail && <div style={{ marginTop: 6 }}>{cert.detail}</div>}
+                </Alert>
+              )}
 
               {gatewayIp && (
                 <details className="disclosure" style={{ marginTop: 10 }}>
@@ -79,7 +95,7 @@ function certLabel(cert: CertificateView): string {
     case 'valid':
       return `Valid until ${cert.expiresAt ? new Date(cert.expiresAt).toDateString() : 'unknown'}${cert.autoRenew ? ' · auto-renews' : ''}`;
     case 'pending':
-      return 'Being issued…';
+      return 'Waiting for DNS, then it will be issued automatically';
     case 'error':
       return 'Could not be issued';
     default:
@@ -127,7 +143,7 @@ export function DnsInstructions({ hostname, gatewayIp }: { hostname: string; gat
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <label style={{ fontSize: 13, color: 'var(--text-dim)', display: 'block', marginBottom: 6 }}>
+        <label style={{ fontSize: 'var(--text-body)', color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
           Where is your domain registered?
         </label>
         <select
@@ -138,7 +154,7 @@ export function DnsInstructions({ hostname, gatewayIp }: { hostname: string; gat
             padding: '8px 11px',
             background: 'var(--bg-inset)',
             color: 'var(--text)',
-            border: '1px solid var(--border)',
+            border: '1px solid var(--hairline-strong)',
             borderRadius: 7,
           }}
         >
@@ -163,7 +179,7 @@ export function DnsInstructions({ hostname, gatewayIp }: { hostname: string; gat
       </ol>
 
       {guide.url && (
-        <p style={{ fontSize: 13 }}>
+        <p style={{ fontSize: 'var(--text-body)' }}>
           <ExternalLink href={guide.url}>Open {guide.name} ↗</ExternalLink>
         </p>
       )}

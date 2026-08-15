@@ -23,7 +23,7 @@ export function StatusRow({
       <span className="label">{label}</span>
       {tone && <Dot tone={tone} />}
       <span className="value">{value}</span>
-      {detail && <span style={{ color: 'var(--text-faint)', fontSize: 12.5 }}>{detail}</span>}
+      {detail && <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-small)' }}>{detail}</span>}
     </div>
   );
 }

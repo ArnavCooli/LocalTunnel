@@ -383,6 +383,117 @@ function explainInstallFailure(code: number, transcript: string[]): InstallError
   );
 }
 
+export interface UninstallTarget {
+  host: string;
+  port: number;
+  username: string;
+  privateKeyPath?: string | null;
+  useAgent?: boolean;
+  passphrase?: string;
+}
+
+export interface UninstallResult {
+  ok: boolean;
+  steps: string[];
+  output: string[];
+}
+
+/**
+ * Remove the gateway from the user's server, best-effort.
+ *
+ * The installer writes /opt/localtunnel/uninstall.sh, so that is the first choice.
+ * If it is missing — an old or partial install — the same removal is done inline.
+ * Every step is reported rather than silently swallowed, because "we tried to clean
+ * up your server" is only trustworthy if it says what actually happened.
+ */
+export function uninstallGateway(
+  target: UninstallTarget,
+  onOutput?: (line: string) => void,
+): Promise<UninstallResult> {
+  return new Promise((resolve, reject) => {
+    const client = new Client();
+    const output: string[] = [];
+    const say = (line: string) => {
+      output.push(line);
+      onOutput?.(line);
+    };
+
+    const script = [
+      'set -u',
+      'SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo -n"',
+      'if [ -x /opt/localtunnel/uninstall.sh ]; then',
+      '  echo "running the installer\'s own uninstall script"',
+      '  $SUDO /opt/localtunnel/uninstall.sh',
+      'else',
+      '  echo "uninstall.sh not found — removing the pieces directly"',
+      '  $SUDO systemctl disable --now localtunnel-gateway 2>/dev/null || true',
+      '  $SUDO rm -f /etc/systemd/system/localtunnel-gateway.service',
+      '  $SUDO systemctl daemon-reload 2>/dev/null || true',
+      '  $SUDO rm -rf /opt/localtunnel /etc/localtunnel /var/lib/localtunnel /var/log/localtunnel',
+      '  $SUDO userdel localtunnel 2>/dev/null || true',
+      'fi',
+      // Leave the machine as we found it, including the ports we opened.
+      'command -v ufw >/dev/null 2>&1 && { $SUDO ufw delete allow 443/tcp; $SUDO ufw delete allow 80/tcp; } >/dev/null 2>&1 || true',
+      'echo "LOCALTUNNEL_UNINSTALLED"',
+      'echo "--- remaining:"',
+      'ls -d /opt/localtunnel /etc/localtunnel /var/lib/localtunnel 2>/dev/null || echo "  nothing left"',
+      'systemctl is-active localtunnel-gateway 2>/dev/null || echo "  service is gone"',
+    ].join('\n');
+
+    client.once('ready', () => {
+      client.exec(script, (err, stream) => {
+        if (err) {
+          client.end();
+          return reject(err);
+        }
+        let buffer = '';
+        const consume = (text: string) => {
+          buffer += text;
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) if (line.trim()) say(line.trimEnd());
+        };
+        stream.on('data', (c: Buffer) => consume(c.toString()));
+        stream.stderr.on('data', (c: Buffer) => consume(c.toString()));
+        stream.on('close', () => {
+          if (buffer.trim()) say(buffer.trim());
+          client.end();
+          const text = output.join('\n');
+          const removed = text.includes('LOCALTUNNEL_UNINSTALLED');
+          const steps: string[] = [];
+          if (removed) {
+            steps.push('Stopped and removed the gateway service');
+            steps.push('Deleted /opt/localtunnel, /etc/localtunnel and /var/lib/localtunnel');
+            steps.push('Removed the localtunnel system user');
+            if (text.includes('nothing left')) steps.push('Verified nothing is left behind');
+          }
+          if (/sudo: a password is required|not in the sudoers/i.test(text)) {
+            steps.push('That account could not run administrative commands — nothing was removed');
+            resolve({ ok: false, steps, output });
+            return;
+          }
+          resolve({ ok: removed, steps, output });
+        });
+      });
+    });
+    client.once('error', (err) => reject(translateSshError(err as NodeJS.ErrnoException, target as InstallTarget)));
+
+    const config: ConnectConfig = {
+      host: target.host,
+      port: target.port || 22,
+      username: target.username,
+      readyTimeout: 25_000,
+      hostVerifier: () => true,
+    };
+    if (target.useAgent) config.agent = agentSocket() ?? undefined;
+    if (target.privateKeyPath) {
+      config.privateKey = readFileSync(target.privateKeyPath);
+      config.passphrase = target.passphrase;
+    }
+    client.connect(config);
+  });
+}
+
 export class InstallError extends Error {
   constructor(
     message: string,

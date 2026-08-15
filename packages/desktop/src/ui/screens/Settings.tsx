@@ -7,12 +7,17 @@ export function Settings({
   onChanged,
   notify,
   onReset,
+  gatewayForCleanup,
+  onRequestServerCleanup,
 }: {
   state: AppState | null;
   onChanged: () => void;
   notify: (message: string, tone?: 'info' | 'error') => void;
   /** Sends the app back to the first-launch screen after a reset. */
   onReset: () => void;
+  /** The active gateway, so a reset can offer to clean the server too. */
+  gatewayForCleanup?: { id: string; name: string; host: string; sshUsername?: string | null; sshPort?: number } | null;
+  onRequestServerCleanup: (gateway: { id: string; name: string; host: string; sshUsername?: string | null; sshPort?: number }) => void;
 }) {
   const [logs, setLogs] = useState<string[]>([]);
   const [gatewayLogHint, setGatewayLogHint] = useState<string | null>(null);
@@ -21,6 +26,7 @@ export function Settings({
   const [done, setDone] = useState<string[]>([]);
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [alsoRemoveServer, setAlsoRemoveServer] = useState(false);
 
   useEffect(() => {
     const unsubscribe = api.agent.onLog((line) => setLogs((current) => [...current.slice(-300), line.trimEnd()]));
@@ -49,7 +55,7 @@ export function Settings({
           />
           <label htmlFor="agentAutostart" style={{ margin: 0 }}>
             Keep services online when LocalTunnel is closed
-            <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
+            <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-caption)' }}>
               Runs the tunnel as a background service that starts with your computer. Turning this off
               means your sites go down when you quit the app.
             </div>
@@ -120,13 +126,13 @@ export function Settings({
       {confirmUnlink && (
         <Modal title="Stop and unlink this computer?" onClose={() => setConfirmUnlink(false)}>
           <p style={{ marginTop: 0 }}>This will:</p>
-          <ul style={{ paddingLeft: 18, color: 'var(--text-dim)' }}>
+          <ul style={{ paddingLeft: 18, color: 'var(--text-secondary)' }}>
             <li>Take any services hosted on this computer offline immediately</li>
             <li>Stop the background agent and remove it from starting at login</li>
             <li>Delete this machine's certificate from this computer</li>
             <li>Revoke this machine on the gateway, so that certificate cannot be reused</li>
           </ul>
-          <p style={{ color: 'var(--text-dim)' }}>
+          <p style={{ color: 'var(--text-secondary)' }}>
             Your gateway and its other machines are unaffected. You can connect this computer again
             later — it will be issued a new identity.
           </p>
@@ -172,7 +178,7 @@ export function Settings({
       {confirmReset && (
         <Modal title="Reset LocalTunnel?" onClose={() => setConfirmReset(false)}>
           <p style={{ marginTop: 0 }}>This computer will be returned to first-launch state:</p>
-          <ul style={{ paddingLeft: 18, color: 'var(--text-dim)' }}>
+          <ul style={{ paddingLeft: 18, color: 'var(--text-secondary)' }}>
             <li>Any services hosted here go offline immediately</li>
             <li>The agent stops, and its private key and certificate are deleted</li>
             <li>This machine is revoked on the gateway</li>
@@ -180,13 +186,32 @@ export function Settings({
             <li>The setup wizard starts again from the beginning</li>
           </ul>
 
-          <Alert tone="warn" title="Your VPS is not touched">
-            The gateway keeps running on your server, and so do services belonging to your other
-            machines. This only resets the app on this computer. To remove the gateway itself, run{' '}
-            <code>sudo /opt/localtunnel/uninstall.sh</code> on the server.
-          </Alert>
+          <div className="checkbox">
+            <input
+              type="checkbox"
+              id="alsoServer"
+              checked={alsoRemoveServer}
+              onChange={(e) => setAlsoRemoveServer(e.target.checked)}
+            />
+            <label htmlFor="alsoServer" style={{ margin: 0 }}>
+              Also remove LocalTunnel from my server
+              <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-caption)' }}>
+                Connects over SSH and deletes the gateway, its certificate authority and its system
+                user. Your VPS keeps running — delete the instance at your provider to stop paying
+                for it. Leave this off to reset only this computer.
+              </div>
+            </label>
+          </div>
 
-          <p style={{ color: 'var(--text-dim)' }}>
+          {!alsoRemoveServer && (
+            <Alert tone="warn" title="Your VPS is not touched">
+              The gateway keeps running on your server, and so do services belonging to your other
+              machines. To remove the gateway later, run{' '}
+              <code>sudo /opt/localtunnel/uninstall.sh</code> on it.
+            </Alert>
+          )}
+
+          <p style={{ color: 'var(--text-secondary)' }}>
             You will need the gateway's admin token and fingerprint to add it back, so reinstalling
             the gateway is usually simpler than reconnecting to it.
           </p>
@@ -202,7 +227,10 @@ export function Settings({
                   const result = (await api.app.reset()) as { steps?: string[] };
                   setDone(result.steps ?? []);
                   notify('LocalTunnel has been reset.');
-                  onReset();
+                  // The server cleanup needs SSH, so it is handed to the same
+                  // dialog the Gateways tab uses rather than done silently.
+                  if (alsoRemoveServer && gatewayForCleanup) onRequestServerCleanup(gatewayForCleanup);
+                  else onReset();
                 } catch (err) {
                   notify(err instanceof Error ? err.message : String(err), 'error');
                 } finally {

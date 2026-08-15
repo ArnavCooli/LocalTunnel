@@ -63,7 +63,7 @@ export function Welcome({
       </p>
 
       <div style={{ width: 420, marginTop: 26, textAlign: 'left' }}>
-        <div style={{ fontSize: 12, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+        <div className="eyebrow">
           Recommended
         </div>
         <Choice
@@ -73,7 +73,7 @@ export function Welcome({
           onClick={() => onChoose('oracle')}
         />
 
-        <div style={{ fontSize: 12, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '18px 0 8px' }}>
+        <div className="eyebrow">
           Already have a server?
         </div>
         <Choice
@@ -90,7 +90,7 @@ export function Welcome({
         />
       </div>
 
-      <p style={{ marginTop: 26, fontSize: 12.5, color: 'var(--text-faint)' }}>
+      <p style={{ marginTop: 26, fontSize: 'var(--text-small)', color: 'var(--text-tertiary)' }}>
         No peer-to-peer, no mesh VPN, no Cloudflare Tunnel — your traffic goes through your own
         server and nowhere else.{' '}
         <ExternalLink href="https://github.com/localtunnel/localtunnel#readme">Learn more</ExternalLink>

@@ -28,7 +28,7 @@ export function Home({
 
   return (
     <div className="page">
-      <h1>LocalTunnel</h1>
+      <h1>Overview</h1>
       <p className="subtitle">
         {gatewayOnline && tunnelUp
           ? 'Your gateway is online and this computer is connected.'
@@ -109,7 +109,7 @@ export function Home({
               <span>{SERVICE_ICONS[service.type]}</span>
               <span style={{ flex: 1 }}>
                 <span style={{ fontWeight: 560 }}>{service.publicUrl ?? service.name}</span>
-                <span style={{ display: 'block', fontSize: 12.5, color: 'var(--text-dim)' }}>
+                <span style={{ display: 'block', fontSize: 'var(--text-small)', color: 'var(--text-secondary)' }}>
                   {service.name} → {service.localHost}:{service.localPort}
                 </span>
               </span>

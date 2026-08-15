@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Duplex } from 'node:stream';
 import { isValidHostname, isValidPort, type ServiceType } from '@localtunnel/protocol';
 import type { GatewayConfig } from '../main/config.js';
@@ -156,11 +156,15 @@ export class AdminApi {
 
     if (method === 'POST' && path === '/v1/services') {
       const body = await readJson<Record<string, unknown>>(req);
-      const validation = validateService(body, store);
+      const validation = validateService(body, store, config);
       if ('error' in validation) return json(res, 400, { error: validation.error }), true;
 
       const service = store.addService(validation.value);
-      if (service.hostname) void certificates.ensure(service.hostname);
+      if (service.hostname) {
+        void certificates.ensure(service.hostname, {
+          fallbackToSelfSigned: service.expiresAt !== null,
+        });
+      }
       await forwarder.reconcile();
       registry.syncServices(service.machineId);
       await this.deps.onChange();
@@ -370,9 +374,24 @@ async function readJson<T>(req: http.IncomingMessage): Promise<T> {
 
 type NewService = Parameters<Store['addService']>[0];
 
+/**
+ * A hostname for a temporary link.
+ *
+ * With a wildcard domain configured (`*.lt.example.com` → this gateway) the name is
+ * minted there. Otherwise it is derived from the gateway's own public IP through
+ * sslip.io, whose wildcard DNS resolves `<anything>.<ip>.sslip.io` back to that IP —
+ * so a temporary link works with no DNS setup whatsoever.
+ */
+function temporaryHostname(config: GatewayConfig): string {
+  const label = randomBytes(5).toString('hex');
+  if (config.temporaryDomain) return `${label}.${config.temporaryDomain}`.toLowerCase();
+  return `${label}.${config.publicIp}.sslip.io`.toLowerCase();
+}
+
 function validateService(
   body: Record<string, unknown>,
   store: Store,
+  config: GatewayConfig,
 ): { value: NewService } | { error: string } {
   const type = body.type as ServiceType;
   if (!['http', 'https', 'tcp', 'udp'].includes(type)) {
@@ -387,10 +406,18 @@ function validateService(
   const localHost = String(body.localHost ?? '127.0.0.1');
   if (!/^[\w.:-]+$/.test(localHost)) return { error: 'localHost is not a valid address' };
 
-  const hostname = body.hostname ? String(body.hostname).toLowerCase() : null;
+  let hostname = body.hostname ? String(body.hostname).toLowerCase() : null;
   const publicPort = body.publicPort == null ? null : Number(body.publicPort);
 
+  const expiresAtRaw = body.expiresAt ? String(body.expiresAt) : null;
+  const wantsTemporary = Boolean(body.temporary) || (expiresAtRaw !== null && !hostname);
+
   if (type === 'http' || type === 'https') {
+    if (!hostname && wantsTemporary) {
+      // A temporary link is meant to work without the user owning a domain, so
+      // the gateway mints the hostname itself.
+      hostname = temporaryHostname(config);
+    }
     if (!hostname || !isValidHostname(hostname)) {
       return { error: 'a public hostname like mysite.example.com is required for web services' };
     }
@@ -407,7 +434,7 @@ function validateService(
     if (clash) return { error: `port ${publicPort} is already used by "${clash.name}"` };
   }
 
-  const expiresAt = body.expiresAt ? String(body.expiresAt) : null;
+  const expiresAt = expiresAtRaw;
   if (expiresAt && Number.isNaN(Date.parse(expiresAt))) {
     return { error: 'expiresAt must be an ISO timestamp' };
   }

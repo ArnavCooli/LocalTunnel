@@ -28,6 +28,14 @@ const api = {
     install: (target: Record<string, string>) => ipcRenderer.invoke('gateway:install', target),
     installSteps: () => ipcRenderer.invoke('gateway:installSteps'),
     sshCredentials: () => ipcRenderer.invoke('ssh:credentials'),
+    uninstall: (target: Record<string, string>) => ipcRenderer.invoke('gateway:uninstall', target),
+    onUninstallProgress: (handler: (event: unknown) => void) => {
+      const listener = (_e: unknown, payload: unknown) => handler(payload);
+      ipcRenderer.on('gateway:uninstall-progress', listener);
+      return () => {
+        ipcRenderer.removeListener('gateway:uninstall-progress', listener);
+      };
+    },
     onInstallProgress: (handler: (event: unknown) => void) => {
       const listener = (_e: unknown, payload: unknown) => handler(payload);
       ipcRenderer.on('gateway:install-progress', listener);

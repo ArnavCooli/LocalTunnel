@@ -28,6 +28,9 @@ export interface GatewaySummary {
   provider: string;
   region: string | null;
   addedAt: string;
+  /** Remembered from the install, so Update and Remove can prefill them. */
+  sshUsername: string | null;
+  sshPort: number;
   active: boolean;
 }
 

@@ -121,10 +121,14 @@ export function Services({
           agentStatus={agentStatus}
           existing={services}
           onClose={() => setExposing(false)}
-          onCreated={() => {
+          onCreated={(service) => {
             setExposing(false);
             onChanged();
-            notify('Service published.');
+            notify(
+              service?.publicUrl
+                ? `Published at ${service.publicUrl}`
+                : 'Service published.',
+            );
           }}
           notify={notify}
         />
@@ -173,7 +177,7 @@ function ServiceCard({
         </span>
       </div>
 
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 12.5, color: 'var(--accent)', marginBottom: 10 }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--text-small)', color: 'var(--accent)', marginBottom: 10 }}>
         {service.publicUrl ?? '—'}
       </div>
 
@@ -181,7 +185,7 @@ function ServiceCard({
         <Dot tone={serviceStatusTone(service.status)} />
         <span>{serviceStatusLabel(service.status)}</span>
       </div>
-      <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
+      <div style={{ fontSize: 'var(--text-small)', color: 'var(--text-secondary)' }}>
         {target} on {machine?.name ?? 'unknown machine'}
       </div>
 
@@ -204,7 +208,7 @@ function ServiceCard({
         </div>
         {service.certificate && (
           <div className="stat">
-            <div className="stat-value" style={{ fontSize: 14 }}>
+            <div className="stat-value" style={{ fontSize: 'var(--text-body)' }}>
               {service.certificate.state === 'valid' ? '✓ Valid' : service.certificate.state}
             </div>
             <div className="stat-label">TLS</div>
@@ -230,7 +234,7 @@ function ExposeService({
   agentStatus: TunnelStatus | null;
   existing: ServiceView[];
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (service: ServiceView) => void;
   notify: (message: string, tone?: 'info' | 'error') => void;
 }) {
   const [kind, setKind] = useState<ServiceKind | null>(null);
@@ -288,7 +292,7 @@ function ExposeService({
       const expiresAt = form.temporary
         ? new Date(Date.now() + { '1h': 3600e3, '24h': 86400e3, '7d': 604800e3 }[form.ttl]!).toISOString()
         : null;
-      await api.service.create({
+      const created = (await api.service.create({
         machineId: form.machineId,
         name: form.name || definition.title,
         type: definition.type,
@@ -298,8 +302,8 @@ function ExposeService({
         publicPort: isWeb ? null : Number(form.publicPort),
         allowLanTarget: isLan,
         expiresAt,
-      });
-      onCreated();
+      })) as ServiceView;
+      onCreated(created);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -372,7 +376,7 @@ function ExposeService({
                 />
                 <label htmlFor="temporary" style={{ margin: 0 }}>
                   Expose temporarily
-                  <div style={{ color: 'var(--text-faint)', fontSize: 12 }}>
+                  <div style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-caption)' }}>
                     Get a link straight away without setting up DNS. Useful for webhooks and sharing a
                     dev server.
                   </div>
@@ -380,7 +384,10 @@ function ExposeService({
               </div>
 
               {form.temporary ? (
-                <Field label="Keep it public for">
+                <Field
+                  label="Keep it public for"
+                  hint="LocalTunnel generates the public address for you — no domain or DNS needed. You will see the link as soon as it is published."
+                >
                   <select value={form.ttl} onChange={(e) => setForm({ ...form, ttl: e.target.value })}>
                     <option value="1h">1 hour</option>
                     <option value="24h">24 hours</option>
@@ -524,12 +531,22 @@ function ManageService({
             <span>{service.certificate.state === 'valid' ? 'Valid' : service.certificate.state}</span>
           </div>
           {service.certificate.expiresAt && (
-            <div style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
+            <div style={{ fontSize: 'var(--text-small)', color: 'var(--text-secondary)' }}>
               Expires {new Date(service.certificate.expiresAt).toDateString()} · Auto-renew{' '}
               {service.certificate.autoRenew ? 'enabled' : 'off'} · {service.certificate.issuer}
             </div>
           )}
-          {service.certificate.error && <Alert tone="error">{service.certificate.error}</Alert>}
+          {service.certificate.state === 'pending' && service.certificate.detail && (
+            <Alert tone="info" title="Waiting for DNS">
+              {service.certificate.detail}
+            </Alert>
+          )}
+          {service.certificate.error && (
+            <Alert tone="warn">
+              {service.certificate.error}
+              {service.certificate.detail && <div style={{ marginTop: 6 }}>{service.certificate.detail}</div>}
+            </Alert>
+          )}
           <div className="btn-row" style={{ marginTop: 12 }}>
             <button
               className="btn small"

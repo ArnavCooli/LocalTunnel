@@ -296,3 +296,170 @@ test('two machines can serve different hostnames through one gateway', async (t)
   assert.equal((await publicRequest(env.ctx, HOSTNAME, '/')).body, 'hello from home: /');
   assert.equal((await publicRequest(env.ctx, 'second.example.com', '/')).body, 'second machine');
 });
+
+test('a temporary link works without the user owning a domain', async (t) => {
+  const env = await scaffold();
+  t.after(() => env.teardown());
+
+  // Exactly what the "Expose temporarily" checkbox sends: no hostname at all.
+  const res = await adminRequest(env.ctx, 'POST', '/v1/services', {
+    machineId: env.credentials.machineId,
+    name: 'Dev server',
+    type: 'http',
+    localHost: '127.0.0.1',
+    localPort: env.site.port,
+    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+  });
+  assert.equal(res.status, 201, `temporary service should be accepted: ${res.raw}`);
+
+  const service = res.body.service;
+  assert.ok(service.hostname, 'the gateway must mint a hostname');
+  // No wildcard domain is configured here, so it derives one from its own IP.
+  assert.match(service.hostname, /^[a-f0-9]{10}\.127\.0\.0\.1\.sslip\.io$/);
+  assert.equal(service.publicUrl, `https://${service.hostname}`);
+  assert.ok(service.expiresAt, 'it should still expire');
+
+  await waitFor(
+    async () => {
+      const certs = await adminRequest(env.ctx, 'GET', '/v1/certificates');
+      return certs.body.certificates.some((c) => c.hostname === service.hostname && c.state === 'valid');
+    },
+    { label: 'a certificate for the temporary hostname' },
+  );
+
+  // And the link actually serves the local site.
+  const visit = await publicRequest(env.ctx, service.hostname, '/temp');
+  assert.equal(visit.status, 200);
+  assert.equal(visit.body, 'hello from home: /temp');
+});
+
+test('a permanent web service still requires a hostname', async (t) => {
+  const env = await scaffold();
+  t.after(() => env.teardown());
+
+  const res = await adminRequest(env.ctx, 'POST', '/v1/services', {
+    machineId: env.credentials.machineId,
+    name: 'No hostname',
+    type: 'http',
+    localHost: '127.0.0.1',
+    localPort: env.site.port,
+  });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /hostname/i);
+});
+
+test('a real browser negotiates a protocol the gateway can actually speak', async (t) => {
+  const tls = require('node:tls');
+  const env = await scaffold();
+  t.after(() => env.teardown());
+  await env.publish();
+
+  // Every browser offers h2 first. Advertising h2 without serving it made them
+  // negotiate HTTP/2 and then fail — the tests missed it by pinning http/1.1.
+  const negotiated = await new Promise((resolve, reject) => {
+    const socket = tls.connect(
+      {
+        host: '127.0.0.1',
+        port: env.ctx.httpsPort,
+        servername: HOSTNAME,
+        ALPNProtocols: ['h2', 'http/1.1'],
+        rejectUnauthorized: false,
+      },
+      () => {
+        const protocol = socket.alpnProtocol;
+        socket.destroy();
+        resolve(protocol);
+      },
+    );
+    socket.on('error', reject);
+  });
+
+  // The invariant that matters: whatever gets negotiated must actually be served.
+  // Advertising h2 without serving it broke every browser; serving only what is
+  // advertised is the thing to hold onto.
+  assert.ok(['h2', 'http/1.1'].includes(negotiated), `unexpected protocol: ${negotiated}`);
+
+  // And the request still works over that negotiated protocol.
+  const res = await publicRequest(env.ctx, HOSTNAME, '/browser');
+  assert.equal(res.status, 200);
+  assert.equal(res.body, 'hello from home: /browser');
+});
+
+test('HTTP/2 is negotiated and actually served', async (t) => {
+  const tls = require('node:tls');
+  const http2 = require('node:http2');
+  const env = await scaffold();
+  t.after(() => env.teardown());
+  await env.publish();
+
+  const negotiated = await new Promise((resolve, reject) => {
+    const socket = tls.connect(
+      { host: '127.0.0.1', port: env.ctx.httpsPort, servername: HOSTNAME,
+        ALPNProtocols: ['h2', 'http/1.1'], rejectUnauthorized: false },
+      () => { const p = socket.alpnProtocol; socket.destroy(); resolve(p); },
+    );
+    socket.on('error', reject);
+  });
+  assert.equal(negotiated, 'h2', 'a browser should get HTTP/2');
+
+  const body = await new Promise((resolve, reject) => {
+    const session = http2.connect(`https://${HOSTNAME}`, {
+      createConnection: () =>
+        tls.connect({ host: '127.0.0.1', port: env.ctx.httpsPort, servername: HOSTNAME,
+          ALPNProtocols: ['h2'], rejectUnauthorized: false }),
+    });
+    session.on('error', reject);
+    const req = session.request({ ':path': '/over-h2', ':method': 'GET' });
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('response', (headers) => {
+      assert.equal(headers[':status'], 200);
+    });
+    req.on('end', () => { session.close(); resolve(Buffer.concat(chunks).toString()); });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(body, 'hello from home: /over-h2', 'the local site is served over HTTP/2');
+});
+
+test('HTTP/1.1 still works alongside HTTP/2', async (t) => {
+  const env = await scaffold();
+  t.after(() => env.teardown());
+  await env.publish();
+  const res = await publicRequest(env.ctx, HOSTNAME, '/over-h1');
+  assert.equal(res.status, 200);
+  assert.equal(res.body, 'hello from home: /over-h1');
+});
+
+test('text responses are compressed, and a forged X-Forwarded-For is replaced', async (t) => {
+  let seen = null;
+  const env = await scaffold((req, res) => {
+    seen = req.headers;
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html>' + 'a'.repeat(4000) + '</html>');
+  });
+  t.after(() => env.teardown());
+  await env.publish();
+
+  const res = await publicRequest(env.ctx, HOSTNAME, '/', {
+    headers: { 'accept-encoding': 'gzip', 'x-forwarded-for': '10.9.9.9' },
+  });
+  assert.equal(res.headers['content-encoding'], 'gzip', 'html should be compressed');
+  assert.match(String(res.headers.vary ?? ''), /accept-encoding/i);
+
+  // The visitor claimed to be 10.9.9.9; the local app must not be told that.
+  assert.ok(seen, 'the local service saw the request');
+  assert.ok(!String(seen['x-forwarded-for']).includes('10.9.9.9'), 'a forged chain must be discarded');
+  assert.equal(seen['x-forwarded-for'], '127.0.0.1');
+});
+
+test('an image is not compressed', async (t) => {
+  const env = await scaffold((req, res) => {
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(Buffer.alloc(4000, 7));
+  });
+  t.after(() => env.teardown());
+  await env.publish();
+  const res = await publicRequest(env.ctx, HOSTNAME, '/x.png', { headers: { 'accept-encoding': 'gzip' } });
+  assert.equal(res.headers['content-encoding'], undefined);
+});

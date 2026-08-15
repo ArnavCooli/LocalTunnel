@@ -116,7 +116,8 @@ let hasGateway = scenario !== 'fresh';
 
 const gatewayRow = {
   id: 'gw_1', name: 'US East', host: '129.153.0.1', port: 443,
-  provider: 'oracle', region: 'us-east', addedAt: '2026-08-01T00:00:00.000Z', active: true,
+  provider: 'oracle', region: 'us-east', addedAt: '2026-08-01T00:00:00.000Z',
+  sshUsername: 'opc', sshPort: 22, active: true,
 };
 
 contextBridge.exposeInMainWorld('localtunnel', {
@@ -157,6 +158,17 @@ contextBridge.exposeInMainWorld('localtunnel', {
       { key: 'start', label: 'Starting the gateway' },
     ],
     onInstallProgress: noop,
+    onUninstallProgress: noop,
+    uninstall: async () => ({
+      ok: true,
+      steps: [
+        'Stopped and removed the gateway service',
+        'Deleted /opt/localtunnel, /etc/localtunnel and /var/lib/localtunnel',
+        'Removed the localtunnel system user',
+        'Verified nothing is left behind',
+      ],
+      output: ['running the installer\'s own uninstall script', 'LOCALTUNNEL_UNINSTALLED'],
+    }),
     sshCredentials: async () => ({
       agent: { available: true, identities: ['you@example.com (ED25519)'], socket: '/tmp/agent.sock' },
       keys: [

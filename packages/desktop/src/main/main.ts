@@ -4,7 +4,7 @@ import { agentDataDir, installAutostart, removeAutostart } from '@localtunnel/ag
 import { AppStore } from '../services/store.js';
 import { AgentSupervisor, defaultSocketPath } from '../services/agent-supervisor.js';
 import { gatewayApi, type GatewayConnection } from '../services/gateway-client.js';
-import { GatewayInstaller, INSTALL_STEPS, type InstallEvent } from '../setup/installer.js';
+import { GatewayInstaller, INSTALL_STEPS, uninstallGateway, type InstallEvent } from '../setup/installer.js';
 import { detectSshCredentials } from '../setup/ssh-keys.js';
 import { runDiagnostics } from '../diagnostics/engine.js';
 
@@ -42,7 +42,8 @@ function createWindow(): void {
     minWidth: 940,
     minHeight: 640,
     title: 'LocalTunnel',
-    backgroundColor: '#0d1117',
+    // Match the theme so the window does not flash the wrong colour on open.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1e' : '#f2f2f7',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -195,6 +196,8 @@ function registerIpc(): void {
       provider: g.provider,
       region: g.region,
       addedAt: g.addedAt,
+      sshUsername: g.sshUsername ?? null,
+      sshPort: g.sshPort ?? 22,
       active: store.activeGateway()?.id === g.id,
     })),
   );
@@ -270,11 +273,33 @@ function registerIpc(): void {
       region: target.region || null,
       fingerprint: result.fingerprint,
       adminToken: result.adminToken,
+      sshUsername: String(target.username),
+      sshPort: Number(target.port) || 22,
     });
     return { gateway: { id: profile.id, name: profile.name, host: profile.host } };
   });
 
   ipcMain.handle('gateway:installSteps', () => INSTALL_STEPS);
+
+  /**
+   * Best-effort removal of the gateway from the user's server. Requires SSH again:
+   * the app never keeps the key after installing.
+   */
+  ipcMain.handle('gateway:uninstall', async (event, target: Record<string, string>) => {
+    const result = await uninstallGateway(
+      {
+        host: String(target.host),
+        port: Number(target.port) || 22,
+        username: String(target.username),
+        privateKeyPath: target.privateKeyPath ? String(target.privateKeyPath) : null,
+        useAgent: String(target.useAgent) === 'true',
+        passphrase: target.passphrase || undefined,
+      },
+      (line) => event.sender.send('gateway:uninstall-progress', { type: 'output', line }),
+    );
+    if (result.ok && target.gatewayId) store.removeGateway(String(target.gatewayId));
+    return result;
+  });
 
   /** SSH credentials the user already has, so they need not hunt for a key file. */
   ipcMain.handle('ssh:credentials', () => detectSshCredentials());

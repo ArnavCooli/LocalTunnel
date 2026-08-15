@@ -195,6 +195,9 @@ export interface CertificateView {
   autoRenew: boolean;
   error: string | null;
   issuer: string;
+  /** What the gateway is waiting for — shown while a certificate is pending. */
+  detail?: string | null;
+  nextAttemptAt?: string | null;
 }
 
 export interface ServiceView {

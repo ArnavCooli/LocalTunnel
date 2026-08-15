@@ -103,7 +103,7 @@ export function OracleWizard({
                   {ORACLE_REQUIRED_PORTS.map((port) => (
                     <tr key={port.port}>
                       <td>{port.proto} {port.port}</td>
-                      <td style={{ fontFamily: 'inherit', color: 'var(--text-dim)' }}>{port.reason}</td>
+                      <td style={{ fontFamily: 'inherit', color: 'var(--text-secondary)' }}>{port.reason}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -130,7 +130,7 @@ export function OracleWizard({
             {step.troubleshooting.map((item) => (
               <div key={item.problem} style={{ marginBottom: 12 }}>
                 <div style={{ fontWeight: 560, marginBottom: 3 }}>{item.problem}</div>
-                <div style={{ color: 'var(--text-dim)' }}>{item.fix}</div>
+                <div style={{ color: 'var(--text-secondary)' }}>{item.fix}</div>
               </div>
             ))}
           </details>
@@ -180,7 +180,7 @@ function Illustration({ name }: { name: string }) {
   const content = art[name];
   if (!content) return null;
   return (
-    <div className="code" style={{ marginTop: 18, color: 'var(--text-dim)' }}>
+    <div className="code" style={{ marginTop: 18, color: 'var(--text-secondary)' }}>
       {content}
     </div>
   );
@@ -202,7 +202,7 @@ export function ProviderPicker({
         difference is where the buttons are.
       </p>
 
-      <div style={{ fontSize: 12, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+      <div className="eyebrow">
         Recommended
       </div>
       {PROVIDERS.filter((p) => p.recommended).map((provider) => (
@@ -215,7 +215,7 @@ export function ProviderPicker({
         />
       ))}
 
-      <div style={{ fontSize: 12, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.05em', margin: '20px 0 8px' }}>
+      <div className="eyebrow">
         Other providers
       </div>
       {PROVIDERS.filter((p) => !p.recommended).map((provider) => (
