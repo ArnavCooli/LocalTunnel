@@ -1,0 +1,198 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import http from 'node:http';
+import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
+import { platform } from 'node:os';
+import type { TunnelStatus } from '@localtunnel/agent';
+
+/**
+ * Runs and talks to the background agent.
+ *
+ * The agent is a separate process on purpose: it must keep tunnelling when the
+ * window is closed, and it must survive the UI crashing. The app supervises it while
+ * open; the autostart entry keeps it running afterwards.
+ */
+
+export interface SupervisorOptions {
+  /** Node executable to run the agent with. */
+  execPath: string;
+  /** Path to the agent's entrypoint. */
+  scriptPath: string;
+  socketPath: string;
+}
+
+export class AgentSupervisor extends EventEmitter {
+  private child: ChildProcess | null = null;
+  private polling: NodeJS.Timeout | null = null;
+  private lastStatus: TunnelStatus | null = null;
+
+  constructor(private readonly options: SupervisorOptions) {
+    super();
+  }
+
+  /** Start the agent if it is not already running (possibly from autostart). */
+  async ensureRunning(): Promise<void> {
+    if (await this.ping()) {
+      this.startPolling();
+      return;
+    }
+    if (!existsSync(this.options.scriptPath)) {
+      throw new Error('The LocalTunnel agent is missing from this installation.');
+    }
+    this.child = spawn(this.options.execPath, [this.options.scriptPath], {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    this.child.stdout?.on('data', (chunk: Buffer) => this.emit('log', chunk.toString()));
+    this.child.stderr?.on('data', (chunk: Buffer) => this.emit('log', chunk.toString()));
+    this.child.on('exit', (code) => {
+      this.emit('log', `agent exited with code ${code}\n`);
+      this.child = null;
+    });
+    this.child.unref();
+
+    // The IPC socket appears a moment after the process starts.
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if (await this.ping()) break;
+      await delay(100);
+    }
+    this.startPolling();
+  }
+
+  private startPolling(): void {
+    if (this.polling) return;
+    this.polling = setInterval(() => {
+      void this.status().then((status) => {
+        if (!status) return;
+        if (JSON.stringify(status) !== JSON.stringify(this.lastStatus)) {
+          this.lastStatus = status;
+          this.emit('status', status);
+        }
+      });
+    }, 1000);
+  }
+
+  stopPolling(): void {
+    if (this.polling) clearInterval(this.polling);
+    this.polling = null;
+  }
+
+  async ping(): Promise<boolean> {
+    try {
+      await this.request('GET', '/status');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async status(): Promise<TunnelStatus | null> {
+    try {
+      return await this.request<TunnelStatus>('GET', '/status');
+    } catch {
+      return null;
+    }
+  }
+
+  connect(options: { host: string; port: number; token: string; fingerprint: string }) {
+    return this.request<{ machineId: string; gatewayId: string }>('POST', '/enroll', options);
+  }
+
+  start() {
+    return this.request<TunnelStatus>('POST', '/start');
+  }
+
+  stop() {
+    return this.request<TunnelStatus>('POST', '/stop');
+  }
+
+  disconnect() {
+    return this.request<{ ok: boolean }>('POST', '/disconnect');
+  }
+
+  /** Forget this machine's identity entirely, then stop the agent. */
+  async reset(): Promise<void> {
+    this.stopPolling();
+    try {
+      await this.request<{ ok: boolean }>('POST', '/reset');
+    } catch {
+      // Already gone, or too old to know this endpoint — fall through to the kill.
+    }
+    this.child?.kill();
+    this.child = null;
+    this.lastStatus = null;
+  }
+
+  /** Ask the agent process to exit, and stop supervising it. */
+  async shutdown(): Promise<void> {
+    this.stopPolling();
+    try {
+      await this.request<{ ok: boolean }>('POST', '/shutdown');
+    } catch {
+      // The agent may have already gone; fall back to the child we spawned.
+    }
+    this.child?.kill();
+    this.child = null;
+    this.lastStatus = null;
+  }
+
+  discover() {
+    return this.request<{ services: { port: number; guess: string }[] }>('GET', '/discover');
+  }
+
+  private request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const payload = body === undefined ? null : JSON.stringify(body);
+      const req = http.request(
+        {
+          socketPath: this.options.socketPath,
+          path,
+          method,
+          timeout: 30_000,
+          headers: payload
+            ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+            : {},
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8');
+            let parsed: unknown = null;
+            try {
+              parsed = text ? JSON.parse(text) : null;
+            } catch {
+              parsed = { error: text };
+            }
+            if ((res.statusCode ?? 500) >= 400) {
+              const message =
+                parsed && typeof parsed === 'object' && 'error' in parsed
+                  ? String((parsed as { error: unknown }).error)
+                  : `agent request failed (${res.statusCode})`;
+              reject(new Error(message));
+            } else {
+              resolve(parsed as T);
+            }
+          });
+        },
+      );
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('The LocalTunnel agent did not respond.'));
+      });
+      req.on('error', reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+}
+
+export function defaultSocketPath(dataDir: string): string {
+  if (platform() === 'win32') return '\\\\.\\pipe\\localtunnel-agent';
+  return `${dataDir}/agent.sock`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

@@ -1,0 +1,60 @@
+[Unit]
+Description=LocalTunnel Gateway
+Documentation=https://github.com/localtunnel/localtunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=localtunnel
+Group=localtunnel
+# The installer rewrites this line with the real node path and install prefix.
+ExecStart=/usr/bin/node /opt/localtunnel/gateway/dist/main/index.js /etc/localtunnel/gateway.json
+Restart=always
+RestartSec=3
+# Binding 80/443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# --- sandboxing -------------------------------------------------------------
+# The gateway is public-facing, so it gets the narrowest environment that still
+# lets it serve traffic: no new privileges, a private /tmp, a read-only system,
+# no access to home directories, and exactly one writable state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# MemoryDenyWriteExecute is deliberately NOT set: V8 compiles JavaScript to machine
+# code at runtime and needs writable-executable pages, so enabling it stops Node
+# from starting at all. Every other hardening directive here is compatible.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+UMask=0077
+
+StateDirectory=localtunnel
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/localtunnel /var/log/localtunnel
+
+# Logs go to journald as well as the rotating file the desktop app reads.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=localtunnel-gateway
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

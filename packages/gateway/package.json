@@ -1,0 +1,22 @@
+{
+  "name": "@localtunnel/gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main/index.js",
+  "bin": {
+    "localtunnel-gateway": "dist/main/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main/index.js"
+  },
+  "dependencies": {
+    "@localtunnel/protocol": "1.0.0",
+    "acme-client": "^5.4.0",
+    "node-forge": "^1.3.1"
+  },
+  "devDependencies": {
+    "@types/node-forge": "^1.3.11"
+  }
+}

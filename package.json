@@ -15,8 +15,10 @@
   "scripts": {
     "build": "npm run build -w @localtunnel/protocol && npm run build -w @localtunnel/gateway && npm run build -w @localtunnel/agent",
     "build:desktop": "npm run build -w @localtunnel/desktop",
-    "test": "npm run build && node --test packages/protocol/test/*.test.js packages/gateway/test/*.test.js",
-    "e2e": "npm run build && node --test packages/gateway/test/e2e.test.js",
+    "test": "npm run build && node --test --test-timeout=120000 \"packages/protocol/test/*.test.js\" \"packages/gateway/test/*.test.js\" && npm run test:installer",
+    "test:installer": "./scripts/bundle-gateway.sh >/dev/null && ./installer/test/run-installer.sh",
+    "e2e": "npm run build && node --test --test-timeout=120000 \"packages/gateway/test/e2e.test.js\"",
+    "bundle": "./scripts/bundle-gateway.sh",
     "dev:gateway": "node packages/gateway/dist/main/index.js",
     "desktop": "npm run start -w @localtunnel/desktop"
   },

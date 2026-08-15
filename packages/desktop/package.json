@@ -1,0 +1,47 @@
+{
+  "name": "@localtunnel/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LocalTunnel — expose your home services to the internet through your own VPS.",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "start": "npm run build && electron .",
+    "dev": "vite",
+    "dist": "../../scripts/bundle-gateway.sh && npm run build && electron-builder",
+    "dist:mac": "npm run dist -- --mac",
+    "dist:win": "npm run dist -- --win",
+    "dist:linux": "npm run dist -- --linux"
+  },
+  "dependencies": {
+    "@localtunnel/agent": "1.0.0",
+    "@localtunnel/protocol": "1.0.0",
+    "ssh2": "^1.15.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ssh2": "^1.15.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "com.localtunnel.desktop",
+    "productName": "LocalTunnel",
+    "files": ["dist/**/*", "node_modules/**/*"],
+    "extraResources": [
+      { "from": "../agent/dist", "to": "agent/dist" },
+      { "from": "../../build/localtunnel-gateway.tar.gz", "to": "gateway/localtunnel-gateway.tar.gz" },
+      { "from": "../../installer", "to": "installer" }
+    ],
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"] },
+    "win": { "target": ["nsis"] },
+    "linux": { "target": ["AppImage", "deb"], "category": "Network" }
+  }
+}
