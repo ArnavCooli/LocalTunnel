@@ -123,13 +123,36 @@ and the agent can only reach what your own user can. On a box you never log into
 graphically, keep it running between sessions with
 `sudo loginctl enable-linger $USER`.
 
-Build installers:
+## Installers
 
 ```bash
-npm run dist:mac -w @localtunnel/desktop
+npm run dist:mac -w @localtunnel/desktop -- --universal   # LocalTunnel-1.0.0-universal.dmg
+npm run dist:linux -w @localtunnel/desktop -- --x64 --arm64
 npm run dist:win -w @localtunnel/desktop
-npm run dist:linux -w @localtunnel/desktop
 ```
+
+They land in `packages/desktop/release/`. Each one carries the gateway payload and
+`install.sh`, which is what lets the app install a gateway over SSH.
+
+| File | For |
+| --- | --- |
+| `LocalTunnel-<version>-universal.dmg` | macOS, Intel and Apple Silicon in one |
+| `LocalTunnel-<version>-x86_64.AppImage` | Any Linux desktop — `chmod +x` and run |
+| `LocalTunnel-<version>-arm64.AppImage` | Linux on arm64, e.g. a Pi desktop |
+
+**The `.deb` has to be built on Linux.** electron-builder shells out to `fpm`, and on
+macOS that produces a corrupt archive — macOS `ar` writes a symbol table instead of a
+Debian package. On any Linux box (or in Docker) the same command produces a real one:
+
+```bash
+docker run --rm -v "$PWD":/project -w /project electronuserland/builder:latest   sh -c "npm ci && npm run dist:linux -w @localtunnel/desktop"
+```
+
+**macOS builds here are unsigned.** Shipping a dmg that opens without a Gatekeeper
+warning needs a *Developer ID Application* certificate from the Apple Developer
+Program — an "Apple Development" certificate is not enough. Until then, opening it
+takes a right-click → Open the first time. Add the certificate to the login keychain
+and drop `CSC_IDENTITY_AUTO_DISCOVERY=false` to sign.
 
 ## Tests
 

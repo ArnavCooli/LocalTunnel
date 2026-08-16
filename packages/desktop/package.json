@@ -10,7 +10,7 @@
     "build": "npm run build:main && npm run build:renderer",
     "start": "npm run build && electron .",
     "dev": "vite",
-    "dist": "../../scripts/bundle-gateway.sh && npm run build && electron-builder",
+    "dist": "../../scripts/bundle-gateway.sh && npm run build && electron-builder --config.electronVersion=$(node -p \"require('electron/package.json').version\")",
     "dist:mac": "npm run dist -- --mac",
     "dist:win": "npm run dist -- --win",
     "dist:linux": "npm run dist -- --linux"
@@ -41,10 +41,17 @@
   "build": {
     "appId": "com.localtunnel.desktop",
     "productName": "LocalTunnel",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "!node_modules/cpu-features/**",
+      "!node_modules/nan/**"
     ],
+    "npmRebuild": false,
     "extraResources": [
       {
         "from": "../agent/dist",
@@ -78,7 +85,13 @@
         "deb"
       ],
       "category": "Network",
-      "icon": "assets/icons/icon.png"
+      "icon": "assets/icons/icon.png",
+      "executableName": "localtunnel"
     }
+  },
+  "homepage": "https://github.com/ArnavCooli/LocalTunnel",
+  "author": {
+    "name": "ArnavCooli",
+    "email": "155097185+ArnavCooli@users.noreply.github.com"
   }
 }
