@@ -13,7 +13,7 @@
     "dist": "../../scripts/bundle-gateway.sh && npm run build && electron-builder --config.electronVersion=$(node -p \"require('electron/package.json').version\")",
     "dist:mac": "npm run dist -- --mac",
     "dist:win": "npm run dist -- --win",
-    "dist:linux": "npm run dist -- --linux"
+    "dist:linux": "npm run dist -- --linux --x64 --arm64 && node ../../scripts/make-deb.mjs"
   },
   "dependencies": {
     "@localtunnel/agent": "1.0.0",
@@ -58,6 +58,18 @@
         "to": "agent/dist"
       },
       {
+        "from": "../../node_modules/node-forge",
+        "to": "agent/node_modules/node-forge"
+      },
+      {
+        "from": "../protocol",
+        "to": "agent/node_modules/@localtunnel/protocol",
+        "filter": [
+          "package.json",
+          "dist/**/*"
+        ]
+      },
+      {
         "from": "../../build/localtunnel-gateway.tar.gz",
         "to": "gateway/localtunnel-gateway.tar.gz"
       },
@@ -81,12 +93,11 @@
     },
     "linux": {
       "target": [
-        "AppImage",
-        "deb"
+        "AppImage"
       ],
       "category": "Network",
       "icon": "assets/icons/icon.png",
-      "executableName": "localtunnel"
+      "executableName": "localtunnel-desktop"
     }
   },
   "homepage": "https://github.com/ArnavCooli/LocalTunnel",

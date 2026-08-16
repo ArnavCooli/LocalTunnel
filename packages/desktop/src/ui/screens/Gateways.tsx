@@ -3,6 +3,7 @@ import { api, formatBytes, type GatewayStatusResult, type GatewaySummary } from 
 import { Alert, Copyable, Dot, Empty, Field, Modal } from '../components.js';
 import { providerById } from '../../providers/catalog.js';
 import { InstallGateway } from './InstallGateway.js';
+import { SignInWithToken } from './SignInWithToken.js';
 import { UninstallGateway } from './UninstallGateway.js';
 
 interface GatewayCredentials {
@@ -211,14 +212,16 @@ export function Gateways({
       )}
 
       {addingExisting && (
-        <AddExistingGateway
-          onClose={() => setAddingExisting(false)}
-          onAdded={() => {
-            setAddingExisting(false);
-            onChanged();
-            notify('Gateway added.');
-          }}
-        />
+        <Modal title="Sign in to an existing gateway" onClose={() => setAddingExisting(false)}>
+          <SignInWithToken
+            onAdded={() => {
+              setAddingExisting(false);
+              onChanged();
+              notify('Gateway added.');
+            }}
+            onCancel={() => setAddingExisting(false)}
+          />
+        </Modal>
       )}
 
       {removing && (
@@ -260,68 +263,6 @@ export function Gateways({
 }
 
 /** For a gateway installed by hand, or on another computer. */
-function AddExistingGateway({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
-  const [form, setForm] = useState({ name: 'My Gateway', host: '', port: '443', adminToken: '', fingerprint: '' });
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const submit = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await api.gateway.addExisting({ ...form, port: Number(form.port) || 443, provider: 'generic' });
-      onAdded();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal title="Add an existing gateway" onClose={onClose}>
-      <p className="section-hint">
-        The installer prints an admin token and a certificate fingerprint when it finishes. Paste
-        both here.
-      </p>
-      <Field label="Name">
-        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-      </Field>
-      <div className="field-row">
-        <Field label="Public IP">
-          <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="129.153.0.1" />
-        </Field>
-        <Field label="Port">
-          <input value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} />
-        </Field>
-      </div>
-      <Field label="Admin token">
-        <input value={form.adminToken} onChange={(e) => setForm({ ...form, adminToken: e.target.value })} />
-      </Field>
-      <Field label="Certificate fingerprint" hint="The SHA-256 fingerprint printed by the installer.">
-        <input
-          value={form.fingerprint}
-          onChange={(e) => setForm({ ...form, fingerprint: e.target.value })}
-          placeholder="A1:B2:C3:…"
-        />
-      </Field>
-      {error && <Alert tone="error">{error}</Alert>}
-      <div className="btn-row">
-        <button
-          className="btn primary"
-          onClick={() => void submit()}
-          disabled={saving || !form.host || !form.adminToken || !form.fingerprint}
-        >
-          Add gateway
-        </button>
-        <button className="btn ghost" onClick={onClose}>
-          Cancel
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
 /**
  * The four details that identify a gateway, for putting into the terminal client,
  * another computer's copy of this app, or a password manager.

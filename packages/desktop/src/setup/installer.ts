@@ -65,6 +65,24 @@ export interface InstallResult {
   version: string;
 }
 
+/** Just enough to sign in — no bundle, no gateway name. */
+export type ProbeTarget = Pick<
+  InstallTarget,
+  'host' | 'port' | 'username' | 'privateKeyPath' | 'useAgent' | 'passphrase'
+>;
+
+export interface ServerProbe {
+  /** True when /etc/localtunnel/gateway.json is already there. */
+  gatewayInstalled: boolean;
+  os: string;
+  arch: string;
+}
+
+export type AdoptTarget = ProbeTarget & {
+  /** installer/adopt.sh, shipped with the app. */
+  adoptScriptPath: string;
+};
+
 export type InstallEvent =
   | { type: 'step'; key: string; label: string; state: 'running' | 'done' | 'failed' }
   | { type: 'output'; line: string }
@@ -149,6 +167,102 @@ export class GatewayInstaller extends EventEmitter {
       throw err;
     } finally {
       this.client?.end();
+      this.client = null;
+    }
+  }
+
+  /**
+   * What is already on that server, before anything is uploaded to it.
+   *
+   * A server the user has used before may already be running a gateway, and
+   * reinstalling over it would throw away the machines and services it holds.
+   * Asking first is what lets the app offer to take it over instead.
+   */
+  async probe(target: ProbeTarget): Promise<ServerProbe> {
+    const client = new Client();
+    this.client = client;
+    try {
+      await this.connect(client, target as InstallTarget);
+      const [installed, arch, os] = await Promise.all([
+        this.exec(client, 'test -f /etc/localtunnel/gateway.json && echo yes || echo no'),
+        this.exec(client, 'uname -m'),
+        this.exec(client, '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || echo unknown'),
+      ]);
+      return {
+        gatewayInstalled: installed.stdout.includes('yes'),
+        arch: arch.stdout.trim(),
+        os: os.stdout.trim(),
+      };
+    } finally {
+      client.end();
+      this.client = null;
+    }
+  }
+
+  /**
+   * Take over the gateway already on that server.
+   *
+   * Its admin token cannot be read back — the gateway stores only a hash — so
+   * `adopt.sh` sets a new one and hands it back with the gateway's identity. The
+   * old token stops working, which is why the caller has to have said yes first.
+   */
+  async adopt(target: AdoptTarget): Promise<InstallResult> {
+    const client = new Client();
+    this.client = client;
+    const transcript: string[] = [];
+    const say = (line: string) => {
+      transcript.push(line);
+      this.emit('event', { type: 'output', line });
+    };
+
+    try {
+      this.emit('event', { type: 'step', key: 'connect', label: 'Connecting over SSH', state: 'running' });
+      await this.connect(client, target as unknown as InstallTarget);
+      this.emit('event', { type: 'step', key: 'connect', label: 'Connecting over SSH', state: 'done' });
+
+      say('taking over the gateway already on this server');
+      await this.upload(client, target.adoptScriptPath, '/tmp/localtunnel-adopt.sh');
+
+      const command = [
+        'set -e',
+        'if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi',
+        '$SUDO sh /tmp/localtunnel-adopt.sh',
+        'rm -f /tmp/localtunnel-adopt.sh',
+      ].join('\n');
+
+      const { code, stdout, stderr } = await this.exec(client, command);
+      for (const line of `${stdout}\n${stderr}`.split('\n')) {
+        if (line.trim()) say(line.trimEnd());
+      }
+
+      const marker = /^LOCALTUNNEL_ADOPT (.+)$/m.exec(stdout);
+      if (!marker) throw explainInstallFailure(code, transcript);
+
+      const facts = JSON.parse(marker[1]) as {
+        gatewayId: string;
+        publicIp: string;
+        httpsPort: number;
+        fingerprint: string;
+        adminToken: string;
+        name?: string;
+      };
+      const result: InstallResult = {
+        ok: true,
+        gatewayId: facts.gatewayId,
+        publicIp: facts.publicIp || target.host,
+        adminToken: facts.adminToken,
+        fingerprint: facts.fingerprint,
+        version: '1.0.0',
+      };
+      this.emit('event', { type: 'done', result });
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const hint = err instanceof InstallError ? err.hint : undefined;
+      this.emit('event', { type: 'error', message, hint });
+      throw err;
+    } finally {
+      client.end();
       this.client = null;
     }
   }

@@ -12,6 +12,7 @@ import {
 import { Toast } from './components.js';
 import { AppSidebar, type Tab } from './components/app-sidebar.js';
 import { Welcome } from './screens/Welcome.js';
+import { SignInWithToken } from './screens/SignInWithToken.js';
 import { OracleWizard, ProviderPicker, ProviderSetup } from './screens/OracleWizard.js';
 import { Home } from './screens/Home.js';
 import { Services } from './screens/Services.js';
@@ -27,6 +28,8 @@ type SetupRoute =
   | { kind: 'welcome' }
   | { kind: 'oracle' }
   | { kind: 'picker' }
+  /** Signing in to a gateway that already exists, with its admin token. */
+  | { kind: 'token' }
   /** `from` is where Back should return to — the screen the user actually came from. */
   | { kind: 'provider'; providerId: string; from: 'welcome' | 'picker' };
 
@@ -142,9 +145,28 @@ export function App() {
           if (choice === 'oracle') setSetup({ kind: 'oracle' });
           else if (choice === 'existing')
             setSetup({ kind: 'provider', providerId: 'generic', from: 'welcome' });
+          else if (choice === 'gateway') setSetup({ kind: 'token' });
           else setSetup({ kind: 'picker' });
         }}
       />
+    );
+  }
+
+  if (setup.kind === 'token') {
+    return (
+      <div className="shell">
+        <div className="main">
+          <div className="page" style={{ maxWidth: 560 }}>
+            <h1>Sign in to your gateway</h1>
+            <p className="subtitle">Connect this computer to a gateway that is already running.</p>
+            <SignInWithToken
+              submitLabel="Sign in"
+              onAdded={(gateway) => void finishSetup(gateway)}
+              onCancel={() => setSetup({ kind: 'welcome' })}
+            />
+          </div>
+        </div>
+      </div>
     );
   }
 

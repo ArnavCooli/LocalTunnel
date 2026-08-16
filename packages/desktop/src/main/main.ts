@@ -25,12 +25,14 @@ function resources() {
         agentScript: join(packagedBase, 'agent', 'dist', 'main', 'index.js'),
         gatewayBundle: join(packagedBase, 'gateway', 'localtunnel-gateway.tar.gz'),
         installerScript: join(packagedBase, 'installer', 'install.sh'),
+        adoptScript: join(packagedBase, 'installer', 'adopt.sh'),
         serviceUnit: join(packagedBase, 'installer', 'localtunnel-gateway.service'),
       }
     : {
         agentScript: join(repoBase, 'packages', 'agent', 'dist', 'main', 'index.js'),
         gatewayBundle: join(repoBase, 'build', 'localtunnel-gateway.tar.gz'),
         installerScript: join(repoBase, 'installer', 'install.sh'),
+        adoptScript: join(repoBase, 'installer', 'adopt.sh'),
         serviceUnit: join(repoBase, 'installer', 'localtunnel-gateway.service'),
       };
 }
@@ -335,6 +337,87 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('gateway:installSteps', () => INSTALL_STEPS);
+
+  /**
+   * Check a gateway's details before they are stored.
+   *
+   * Both secrets fail in the same place otherwise — a wrong admin token and a
+   * wrong fingerprint would both surface later as "cannot reach the gateway" —
+   * so each is reported separately here.
+   */
+  ipcMain.handle('gateway:test', async (_e, details: Record<string, string>) => {
+    const connection = {
+      host: String(details.host),
+      port: Number(details.port) || 443,
+      adminToken: String(details.adminToken),
+      fingerprint: String(details.fingerprint).replace(/[^a-f0-9]/gi, '').toUpperCase(),
+    };
+    if (connection.fingerprint.length !== 64) {
+      return {
+        ok: false,
+        error: 'That certificate fingerprint is not a SHA-256 fingerprint.',
+        hint: 'It is 64 hexadecimal characters, usually shown in colon-separated pairs.',
+      };
+    }
+    try {
+      const status = await gatewayApi.status(connection);
+      return { ok: true, name: status.gateway.name, version: status.gateway.version };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: message,
+        hint: /admin token/i.test(message)
+          ? 'The address and fingerprint were accepted, so it is the admin token that is wrong.'
+          : undefined,
+      };
+    }
+  });
+
+  /** What is on that server already, so the app can offer the right next step. */
+  ipcMain.handle('gateway:probe', async (_e, target: Record<string, string>) => {
+    const installer = new GatewayInstaller();
+    return installer.probe({
+      host: String(target.host),
+      port: Number(target.port) || 22,
+      username: String(target.username),
+      privateKeyPath: target.privateKeyPath ? String(target.privateKeyPath) : null,
+      useAgent: String(target.useAgent) === 'true',
+      passphrase: target.passphrase || undefined,
+    });
+  });
+
+  /** Take over a gateway that is already installed, and store its new token. */
+  ipcMain.handle('gateway:adopt', async (event, target: Record<string, string>) => {
+    const installer = new GatewayInstaller();
+    installer.on('event', (payload: InstallEvent) => {
+      event.sender.send('gateway:install-progress', payload);
+    });
+
+    const result = await installer.adopt({
+      host: String(target.host),
+      port: Number(target.port) || 22,
+      username: String(target.username),
+      privateKeyPath: target.privateKeyPath ? String(target.privateKeyPath) : null,
+      useAgent: String(target.useAgent) === 'true',
+      passphrase: target.passphrase || undefined,
+      adoptScriptPath: resources().adoptScript,
+    });
+
+    const profile = store.addGateway({
+      id: result.gatewayId,
+      name: String(target.name || 'LocalTunnel Gateway'),
+      host: result.publicIp || String(target.host),
+      port: 443,
+      provider: String(target.provider || 'generic'),
+      region: null,
+      fingerprint: result.fingerprint,
+      adminToken: result.adminToken,
+      sshUsername: String(target.username),
+      sshPort: Number(target.port) || 22,
+    });
+    return { gateway: { id: profile.id, name: profile.name, host: profile.host } };
+  });
 
   /**
    * Best-effort removal of the gateway from the user's server. Requires SSH again:

@@ -127,7 +127,7 @@ graphically, keep it running between sessions with
 
 ```bash
 npm run dist:mac -w @localtunnel/desktop -- --universal   # LocalTunnel-1.0.0-universal.dmg
-npm run dist:linux -w @localtunnel/desktop -- --x64 --arm64
+npm run dist:linux -w @localtunnel/desktop -- --x64 --arm64  # AppImages + .deb
 npm run dist:win -w @localtunnel/desktop
 ```
 
@@ -139,14 +139,20 @@ They land in `packages/desktop/release/`. Each one carries the gateway payload a
 | `LocalTunnel-<version>-universal.dmg` | macOS, Intel and Apple Silicon in one |
 | `LocalTunnel-<version>-x86_64.AppImage` | Any Linux desktop — `chmod +x` and run |
 | `LocalTunnel-<version>-arm64.AppImage` | Linux on arm64, e.g. a Pi desktop |
+| `localtunnel-desktop_<version>_amd64.deb` | Debian, Ubuntu, Lubuntu, Mint — installs to `/opt` with a menu entry |
+| `localtunnel-desktop_<version>_arm64.deb` | The same, on arm64 |
 
-**The `.deb` has to be built on Linux.** electron-builder shells out to `fpm`, and on
-macOS that produces a corrupt archive — macOS `ar` writes a symbol table instead of a
-Debian package. On any Linux box (or in Docker) the same command produces a real one:
+`dist:linux` builds the AppImages with electron-builder, then the `.deb`s with
+[`scripts/make-deb.mjs`](scripts/make-deb.mjs) — this repo packages those itself
+because electron-builder shells out to `fpm`, which on macOS emits a corrupt archive
+(macOS `ar` writes a BSD symbol table where a Debian package wants plain members).
+Doing it here means a release can be cut from any machine. `npm run deb` repackages
+them alone from whatever is already unpacked in `release/`.
 
-```bash
-docker run --rm -v "$PWD":/project -w /project electronuserland/builder:latest   sh -c "npm ci && npm run dist:linux -w @localtunnel/desktop"
-```
+**AppImages need the executable bit.** Every download drops it, as does any copy via
+macOS or a FAT drive, and a file manager then refuses to open the file — Lubuntu says
+"file type not supported". `chmod +x` fixes that, and Ubuntu 22.04 and newer also
+need `sudo apt install libfuse2`. The `.deb` avoids both.
 
 **macOS builds here are unsigned.** Shipping a dmg that opens without a Gatekeeper
 warning needs a *Developer ID Application* certificate from the Apple Developer

@@ -7,6 +7,12 @@ import type { SshCredentials } from '../../setup/ssh-keys.js';
 
 type StepState = 'pending' | 'running' | 'done' | 'failed';
 
+interface ServerProbe {
+  gatewayInstalled: boolean;
+  os: string;
+  arch: string;
+}
+
 /** How the user has chosen to authenticate to their server. */
 type AuthChoice =
   | { kind: 'none' }
@@ -53,6 +59,8 @@ export function InstallGateway({
   const [steps, setSteps] = useState<{ key: string; label: string; state: StepState }[]>([]);
   const [output, setOutput] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
+  /** Set when the server turns out to have a gateway on it already. */
+  const [existing, setExisting] = useState<ServerProbe | null>(null);
   const [error, setError] = useState<{ message: string; hint?: string } | null>(null);
   const consoleRef = useRef<HTMLDivElement>(null);
 
@@ -101,6 +109,54 @@ export function InstallGateway({
 
   const set = (key: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [key]: e.target.value });
+
+  const payload = () => ({
+    ...form,
+    provider: providerId,
+    privateKeyPath: auth.kind === 'file' ? auth.path : '',
+    useAgent: String(auth.kind === 'agent'),
+  });
+
+  /**
+   * Look before installing.
+   *
+   * Running the installer over a server that already has a gateway would replace
+   * a working one — its machines, services and certificates are all in there — so
+   * when one is found the user is asked whether to take it over instead.
+   */
+  const begin = async () => {
+    setRunning(true);
+    setError(null);
+    setOutput([]);
+    setExisting(null);
+    try {
+      const probe = (await api.gateway.probe(payload())) as ServerProbe;
+      if (probe.gatewayInstalled) {
+        setExisting(probe);
+        return;
+      }
+      await install();
+    } catch (err) {
+      setError({ message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  /** Take over the gateway that is already there, with a new admin token. */
+  const adopt = async () => {
+    setRunning(true);
+    setError(null);
+    setOutput([]);
+    try {
+      const result = await api.gateway.adopt(payload());
+      onInstalled((result as { gateway: { id: string; name: string; host: string } }).gateway);
+    } catch (err) {
+      if (!error) setError({ message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setRunning(false);
+    }
+  };
 
   const install = async () => {
     setRunning(true);
@@ -228,9 +284,47 @@ export function InstallGateway({
         </Field>
       </details>
 
+      {existing && (
+        <Alert tone="info" title="This server already has a LocalTunnel gateway">
+          <p>
+            Installing over it would replace a working gateway — the machines, services and
+            certificates it holds would go with it. You can take it over instead, and everything it
+            is already serving keeps running.
+          </p>
+          <p>
+            Taking it over issues a <strong>new admin token</strong>. The gateway stores only a hash
+            of the old one, so it cannot be read back — and the old token stops working, which
+            matters if another computer is managing this same gateway. The gateway restarts, so
+            tunnels drop for a few seconds and reconnect on their own.
+          </p>
+          <div className="btn-row">
+            <button className="btn primary" disabled={running} onClick={() => void adopt()}>
+              {running ? 'Taking over…' : 'Take over this gateway'}
+            </button>
+            <button
+              className="btn danger"
+              disabled={running}
+              onClick={() => {
+                setExisting(null);
+                void install();
+              }}
+            >
+              Install a fresh one anyway
+            </button>
+            <button className="btn ghost" disabled={running} onClick={() => setExisting(null)}>
+              Cancel
+            </button>
+          </div>
+        </Alert>
+      )}
+
       <div className="btn-row">
-        <button className="btn primary" disabled={!ready || running} onClick={() => void install()}>
-          {running ? 'Installing…' : 'Install LocalTunnel Gateway'}
+        <button
+          className="btn primary"
+          disabled={!ready || running || existing !== null}
+          onClick={() => void begin()}
+        >
+          {running ? 'Working…' : 'Install LocalTunnel Gateway'}
         </button>
         {onCancel && (
           <button className="btn ghost" onClick={onCancel} disabled={running}>

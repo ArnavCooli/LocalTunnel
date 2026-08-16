@@ -44,9 +44,19 @@ export class AgentSupervisor extends EventEmitter {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     });
-    this.child.stdout?.on('data', (chunk: Buffer) => this.emit('log', chunk.toString()));
-    this.child.stderr?.on('data', (chunk: Buffer) => this.emit('log', chunk.toString()));
+    // Keep the tail of the agent's output: if it dies on startup this is the
+    // only explanation anyone gets, and "connect ENOENT …/agent.sock" further
+    // down the call is not one.
+    let output = '';
+    const record = (chunk: Buffer) => {
+      output = `${output}${chunk.toString()}`.slice(-2000);
+      this.emit('log', chunk.toString());
+    };
+    this.child.stdout?.on('data', record);
+    this.child.stderr?.on('data', record);
+    let exitCode: number | null = null;
     this.child.on('exit', (code) => {
+      exitCode = code;
       this.emit('log', `agent exited with code ${code}\n`);
       this.child = null;
     });
@@ -54,10 +64,17 @@ export class AgentSupervisor extends EventEmitter {
 
     // The IPC socket appears a moment after the process starts.
     for (let attempt = 0; attempt < 40; attempt++) {
-      if (await this.ping()) break;
+      if (await this.ping()) {
+        this.startPolling();
+        return;
+      }
       await delay(100);
     }
-    this.startPolling();
+    const detail = output.trim().split('\n').slice(-3).join('\n');
+    throw new Error(
+      `The LocalTunnel agent did not start${exitCode === null ? '' : ` (exit code ${exitCode})`}.` +
+        (detail ? `\n${detail}` : ''),
+    );
   }
 
   private startPolling(): void {
