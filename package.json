@@ -2,18 +2,19 @@
   "name": "localtunnel-monorepo",
   "private": true,
   "version": "1.0.0",
-  "description": "LocalTunnel \u2014 expose home services to the public internet through your own VPS, even behind CGNAT.",
+  "description": "LocalTunnel — expose home services to the public internet through your own VPS, even behind CGNAT.",
   "workspaces": [
     "packages/protocol",
     "packages/gateway",
     "packages/agent",
-    "packages/desktop"
+    "packages/desktop",
+    "packages/cli"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run build -w @localtunnel/protocol && npm run build -w @localtunnel/gateway && npm run build -w @localtunnel/agent",
+    "build": "npm run build -w @localtunnel/protocol && npm run build -w @localtunnel/gateway && npm run build -w @localtunnel/agent && npm run build -w @localtunnel/cli",
     "build:desktop": "npm run build -w @localtunnel/desktop",
     "test": "npm run build && node --test --test-timeout=120000 \"packages/protocol/test/*.test.js\" \"packages/gateway/test/*.test.js\" && npm run test:installer",
     "test:installer": "./scripts/bundle-gateway.sh >/dev/null && ./installer/test/run-installer.sh",
@@ -21,7 +22,8 @@
     "bundle": "./scripts/bundle-gateway.sh",
     "dev:gateway": "node packages/gateway/dist/main/index.js",
     "desktop": "npm run start -w @localtunnel/desktop",
-    "icons": "node scripts/make-icon.mjs"
+    "icons": "node scripts/make-icon.mjs",
+    "cli": "npm run start -w @localtunnel/cli"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

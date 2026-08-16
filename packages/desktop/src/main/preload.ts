@@ -23,6 +23,7 @@ const api = {
   gateway: {
     list: () => ipcRenderer.invoke('gateway:list'),
     status: (gatewayId?: string) => ipcRenderer.invoke('gateway:status', gatewayId),
+    credentials: (gatewayId?: string) => ipcRenderer.invoke('gateway:credentials', gatewayId),
     setActive: (id: string) => ipcRenderer.invoke('gateway:setActive', id),
     rename: (id: string, name: string) => ipcRenderer.invoke('gateway:rename', id, name),
     remove: (id: string) => ipcRenderer.invoke('gateway:remove', id),

@@ -8,10 +8,17 @@ export { Identity, agentDataDir } from '../auth/identity.js';
 export { enroll } from '../auth/enroll.js';
 export { ipcPath, anotherAgentIsRunning, claimIpcSocket } from './ipc.js';
 export { installAutostart, removeAutostart, autostartPath } from './service.js';
+export { main as runAgent };
 export { discoverLocalServices, classifyAddress } from '../service_proxy/local.js';
 export type { TunnelStatus, TunnelState } from '../tunnel/client.js';
 
-async function main(): Promise<void> {
+/**
+ * Run the agent in this process until it is stopped.
+ *
+ * Exported so a front end — the CLI's `localtunnel agent` — can be the ExecStart
+ * of a service unit without pointing systemd inside node_modules.
+ */
+export async function main(): Promise<void> {
   const identity = new Identity();
 
   // The desktop app spawns an agent, and the autostart entry (launchd/systemd/

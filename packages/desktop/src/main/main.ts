@@ -234,6 +234,29 @@ function registerIpc(): void {
     })),
   );
 
+  /**
+   * The gateway's own credentials, decrypted, for the user to read.
+   *
+   * Kept out of `gateway:list` on purpose: the admin token only crosses into the
+   * window when someone asks for it on screen, rather than sitting in renderer
+   * state for the life of the app. It is the same secret the installer printed
+   * once — this is where you get it back, since the server keeps only a hash.
+   */
+  ipcMain.handle('gateway:credentials', (_e, gatewayId?: string) => {
+    const profile = gatewayId ? store.gateway(gatewayId) : store.activeGateway();
+    if (!profile) return null;
+    const adminToken = store.adminToken(profile.id);
+    return {
+      name: profile.name,
+      host: profile.host,
+      port: profile.port,
+      fingerprint: profile.fingerprint,
+      adminToken,
+      /** False when the OS keychain will not give the token back. */
+      readable: adminToken !== null,
+    };
+  });
+
   ipcMain.handle('gateway:status', async (_e, gatewayId?: string) => {
     const connection = connectionFor(gatewayId);
     if (!connection) return null;

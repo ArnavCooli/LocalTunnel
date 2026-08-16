@@ -103,7 +103,9 @@ curl -fsSL https://raw.githubusercontent.com/localtunnel/localtunnel/main/instal
 ```
 
 The script prints the admin token and certificate fingerprint once — paste both into
-**Gateways → Add existing gateway**.
+**Gateways → Add existing gateway**. Once a gateway is in the app, those details can
+be read back at any time from **Gateways → Connection details**; the server keeps
+only a hash of the token, so the app is the only place it still exists.
 
 > If step 11 fails, the Oracle ingress rules from Part 2 step 9 are almost always the
 > reason. The app says so explicitly rather than just failing.
@@ -124,6 +126,24 @@ Reconnect    Automatic
 
 The agent installs itself as a background service (launchd / Windows Service /
 systemd user unit) and starts with the computer.
+
+### On a machine with no desktop
+
+A home server or a Pi you only reach over SSH has nowhere to run the app. Use the
+terminal client there instead — it is the same menu, drawn in the terminal:
+
+```bash
+localtunnel
+```
+
+Choose **Gateways → Add a gateway → Sign in over SSH** and give it the same SSH
+details you would use to log in to the server yourself. It installs the gateway if
+that server does not have one yet, or takes over the one that is already there, and
+keeps the admin token and fingerprint itself — there is nothing to copy. Then
+**Connect this computer**.
+
+Everything from Part 5 onwards works the same way. See the terminal client section in
+[README.md](README.md) for installing it.
 
 ---
 

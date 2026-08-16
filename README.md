@@ -40,6 +40,7 @@ packages/protocol/   wire format + stream multiplexer (shared)
 packages/gateway/    runs on the VPS — ingress, tunnels, routing, TLS, auth, admin API
 packages/agent/      runs on your computer — outbound tunnel, local service proxy
 packages/desktop/    Electron + React app for macOS, Windows and Linux
+packages/cli/        `localtunnel` — the terminal client, for headless Linux boxes
 installer/           install.sh + a sandboxed systemd unit
 scripts/             build tooling
 ```
@@ -57,6 +58,70 @@ Package the gateway payload the desktop app uploads to a VPS:
 ```bash
 ./scripts/bundle-gateway.sh
 ```
+
+## The terminal client
+
+For a headless Linux box — a home server, a Pi, anything you only reach over SSH —
+`localtunnel` does everything the desktop app does, gateway installation included.
+It is a full-screen menu driven with the arrow keys: no flags to memorise, no config
+file to write by hand.
+
+```bash
+npm install && npm run build
+npm link -w @localtunnel/cli   # puts `localtunnel` on your PATH
+localtunnel                    # opens the menu
+```
+
+Or without linking: `npm run cli`.
+
+```
+↑↓ move   enter select   esc back   q quit
+```
+
+**Gateways → Add a gateway → Sign in over SSH** is the same flow as the desktop app:
+you give it the server address, SSH username and port, and pick a key — the private
+keys in `~/.ssh` are listed by name with their type, comment and whether they need a
+passphrase, and a key anywhere else can be given by path. The default is to let
+`ssh` decide, since an agent or a `Host` entry usually has it covered. Everything
+runs through your own `ssh`, so `~/.ssh/config` and `known_hosts` apply as usual.
+
+- **No gateway on that server yet:** it uploads the gateway and runs the installer,
+  the same fourteen steps the desktop app runs, then keeps the admin token and
+  certificate fingerprint it produced.
+- **A gateway is already there:** it takes it over. The server stores only a hash of
+  the admin token, so an existing one cannot be read back — a new one is generated on
+  the server instead. That invalidates the old token, so the desktop app would need
+  the new one; it is shown once at the end.
+
+Nothing has to be copied by hand. Entering the four details manually is still there
+as a fallback, along with importing a gateway from the desktop app on the same Linux
+machine.
+
+To copy the details instead — to set up a second computer, or to keep the admin token
+in a password manager — the desktop app has them under **Gateways → Connection
+details**, with the token behind a **Reveal** button. That is the only way to see an
+existing token again: the gateway itself stores nothing but a SHA-256 hash of it, and
+on macOS and Windows the app's copy is sealed in the OS keychain.
+
+From then on the menu covers connecting this computer, publishing services, machines,
+certificates and diagnostics.
+
+A handful of subcommands exist for scripts and service units, where a menu would be
+in the way:
+
+```bash
+localtunnel status      # what is up right now (add --json for machine-readable)
+localtunnel services    # list published services
+localtunnel up          # start the agent in the background and connect
+localtunnel down        # pause the tunnel, leave the agent running
+localtunnel stop        # stop the agent entirely
+localtunnel agent       # run the agent in the foreground, for systemd
+```
+
+"Start the agent at login" in the menu installs a systemd **user** service — no root,
+and the agent can only reach what your own user can. On a box you never log into
+graphically, keep it running between sessions with
+`sudo loginctl enable-linger $USER`.
 
 Build installers:
 

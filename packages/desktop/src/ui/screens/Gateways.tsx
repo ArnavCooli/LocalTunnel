@@ -1,9 +1,19 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api, formatBytes, type GatewayStatusResult, type GatewaySummary } from '../api.js';
-import { Alert, Dot, Empty, Field, Modal } from '../components.js';
+import { Alert, Copyable, Dot, Empty, Field, Modal } from '../components.js';
 import { providerById } from '../../providers/catalog.js';
 import { InstallGateway } from './InstallGateway.js';
 import { UninstallGateway } from './UninstallGateway.js';
+
+interface GatewayCredentials {
+  name: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  adminToken: string | null;
+  /** False when the OS keychain will not give the token back. */
+  readable: boolean;
+}
 
 export function Gateways({
   gateways,
@@ -22,6 +32,7 @@ export function Gateways({
   const [removing, setRemoving] = useState<GatewaySummary | null>(null);
   const [updating, setUpdating] = useState<GatewaySummary | null>(null);
   const [uninstalling, setUninstalling] = useState<GatewaySummary | null>(null);
+  const [showingDetails, setShowingDetails] = useState<GatewaySummary | null>(null);
 
   return (
     <div className="page">
@@ -73,6 +84,9 @@ export function Gateways({
                       Use this one
                     </button>
                   )}
+                  <button className="btn small" onClick={() => setShowingDetails(gateway)}>
+                    Connection details
+                  </button>
                   <button className="btn small" onClick={() => setUpdating(gateway)}>
                     Update
                   </button>
@@ -151,6 +165,10 @@ export function Gateways({
             </div>
           );
         })
+      )}
+
+      {showingDetails && (
+        <ConnectionDetails gateway={showingDetails} onClose={() => setShowingDetails(null)} />
       )}
 
       {updating && (
@@ -298,6 +316,84 @@ function AddExistingGateway({ onClose, onAdded }: { onClose: () => void; onAdded
         </button>
         <button className="btn ghost" onClick={onClose}>
           Cancel
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * The four details that identify a gateway, for putting into the terminal client,
+ * another computer's copy of this app, or a password manager.
+ *
+ * The admin token is fetched only when this opens, and stays masked until asked
+ * for: the server keeps nothing but a hash of it, so this app is the only place
+ * it still exists once the installer's output has scrolled away.
+ */
+function ConnectionDetails({ gateway, onClose }: { gateway: GatewaySummary; onClose: () => void }) {
+  const [details, setDetails] = useState<GatewayCredentials | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
+
+  useEffect(() => {
+    void api.gateway
+      .credentials(gateway.id)
+      .then((result) => setDetails(result as GatewayCredentials | null))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, [gateway.id]);
+
+  return (
+    <Modal title={`${gateway.name} — connection details`} onClose={onClose}>
+      <p className="section-hint">
+        Anything that needs to manage this gateway needs these four. The terminal client can
+        fetch them over SSH by itself; this is here for when you would rather copy them, or want
+        the admin token somewhere safe.
+      </p>
+
+      {error && <Alert tone="error">{error}</Alert>}
+
+      {details && (
+        <>
+          <Field label="Server address">
+            <Copyable value={details.host} />
+          </Field>
+          <Field label="Admin port">
+            <Copyable value={String(details.port)} />
+          </Field>
+          <Field label="Certificate fingerprint" hint="Not a secret. It is what proves the server you reach is this one.">
+            <Copyable value={details.fingerprint} />
+          </Field>
+          <Field
+            label="Admin token"
+            hint="Full control of this gateway. Treat it like a password."
+          >
+            {!details.readable ? (
+              <Alert tone="error" title="This token cannot be read back">
+                The system keychain would not release it — most often because this app was
+                reinstalled or the login keychain changed. Reinstalling or re-adding the gateway
+                issues a new token.
+              </Alert>
+            ) : revealed ? (
+              <Copyable value={details.adminToken ?? ''} />
+            ) : (
+              <div className="btn-row">
+                <button className="btn" onClick={() => setRevealed(true)}>
+                  Reveal admin token
+                </button>
+              </div>
+            )}
+          </Field>
+        </>
+      )}
+
+      <Alert tone="info" title="Using the terminal client on another computer">
+        Run <code>localtunnel</code> there, choose Gateways → Add a gateway → Enter the details by
+        hand, and paste these in. Signing in over SSH instead needs nothing from this screen.
+      </Alert>
+
+      <div className="btn-row">
+        <button className="btn ghost" onClick={onClose}>
+          Close
         </button>
       </div>
     </Modal>
