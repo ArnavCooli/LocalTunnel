@@ -1348,3 +1348,59 @@ button.row:active {
 .card-head > span > svg {
   color: var(--text-secondary);
 }
+
+/* ==========================================================================
+   Title bar
+   The app draws its own on macOS and Windows, so there has to be a region the
+   user can grab. This strip spans the window above everything, is the drag
+   handle, and is deliberately shorter than the page's top padding so nothing
+   interactive ends up underneath it — a drag region swallows clicks.
+   ========================================================================== */
+
+.titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* Windows publishes the real overlay height once controls are drawn over the
+     page; elsewhere a fixed strip that clears the traffic lights. */
+  height: env(titlebar-area-height, 2.25rem);
+  z-index: 40;
+  -webkit-app-region: drag;
+  /* Not a visible bar: the page shows through it. */
+  background: transparent;
+  pointer-events: auto;
+}
+/* Windows' controls own the right end of the strip — never cover them. */
+html[data-platform="win32"] .titlebar {
+  right: env(titlebar-area-width, 0px);
+  left: env(titlebar-area-x, 0px);
+}
+/* Anything interactive that ever lands in the strip must opt out of dragging. */
+.titlebar button,
+.titlebar a,
+.titlebar input {
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * macOS puts its traffic lights over the top-left of the window, which is the
+ * rail. Push the rail's contents below them rather than letting the mark sit
+ * under the buttons.
+ */
+html[data-platform="darwin"] .app-rail {
+  padding-top: 3rem;
+}
+/* Windows' overlay sits top-right, over the page rather than the rail. */
+html[data-platform="win32"] .page {
+  padding-top: calc(var(--s6) + env(titlebar-area-height, 0px));
+}
+
+/* The rail itself is grabbable everywhere except on its buttons. */
+.app-rail {
+  -webkit-app-region: drag;
+}
+.app-rail button,
+.app-rail a {
+  -webkit-app-region: no-drag;
+}

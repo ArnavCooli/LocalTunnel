@@ -2,6 +2,7 @@ import React from 'react';
 import { Analytics, Chip, CloudServices, Dashboard, Earth, Wikis } from '@carbon/icons-react';
 
 import { IconRail, type NavItemT } from '@/components/ui/sidebar-component';
+import { LocalTunnelMark } from '@/components/logo';
 
 /**
  * LocalTunnel's navigation: the icon rail from the sidebar component, without its
@@ -49,7 +50,8 @@ export function AppSidebar({ tab, onTabChange, healthLabel, healthTone }: AppSid
       activeSection={tab}
       onSectionChange={(section) => onTabChange(section as Tab)}
       navItems={NAV_ITEMS}
-      className="border-r border-neutral-800"
+      className="app-rail border-r border-neutral-800"
+      logo={<LocalTunnelMark size={26} />}
       footer={
         <div className="size-8 flex items-center justify-center" title={healthLabel}>
           <span className={`inline-block size-2 rounded-full ${fill}`} />

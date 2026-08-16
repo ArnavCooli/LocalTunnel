@@ -658,6 +658,7 @@ export function IconRail({
   settingsLabel = "Settings",
   footer,
   className = "border-r border-neutral-800 rounded-l-2xl",
+  logo,
 }: {
   activeSection: string;
   onSectionChange: (section: string) => void;
@@ -665,6 +666,8 @@ export function IconRail({
   settingsLabel?: string;
   footer?: React.ReactNode;
   className?: string;
+  /** Brand mark at the top of the rail. Defaults to the sample logo. */
+  logo?: React.ReactNode;
 }) {
   return (
     <aside
@@ -672,8 +675,8 @@ export function IconRail({
     >
       {/* Logo */}
       <div className="mb-2 size-10 flex items-center justify-center">
-        <div className="size-7">
-          <InterfacesLogoSquare />
+        <div className="size-7 flex items-center justify-center">
+          {logo ?? <InterfacesLogoSquare />}
         </div>
       </div>
 

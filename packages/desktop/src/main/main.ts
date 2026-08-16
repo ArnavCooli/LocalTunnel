@@ -42,9 +42,26 @@ function createWindow(): void {
     minWidth: 940,
     minHeight: 640,
     title: 'LocalTunnel',
-    // Match the theme so the window does not flash the wrong colour on open.
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c1c1e' : '#f2f2f7',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    // The UI is a single dark scheme, so the window must not flash light on open.
+    backgroundColor: '#000000',
+    /*
+     * No OS title bar on macOS or Windows: the app draws its own, and the strip
+     * across the top of the page is the drag region (see `.titlebar`).
+     *
+     * macOS keeps its traffic lights and insets them; Windows draws its minimise
+     * / maximise / close buttons *over* the page as a Window Controls Overlay,
+     * which also publishes the `titlebar-area-*` CSS env vars the layout uses to
+     * keep content clear of them. Linux window managers vary too much to hide the
+     * frame safely, so there it stays native.
+     */
+    titleBarStyle: process.platform === 'linux' ? 'default' : 'hidden',
+    ...(process.platform === 'darwin'
+      ? { trafficLightPosition: { x: 18, y: 14 } }
+      : process.platform === 'win32'
+        ? {
+            titleBarOverlay: { color: '#000000', symbolColor: '#a3a3a3', height: 40 },
+          }
+        : {}),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       // The renderer gets no Node access at all; everything crosses the narrow
@@ -169,6 +186,17 @@ function registerIpc(): void {
     steps.push('Cleared saved gateways, admin tokens, settings and setup progress');
 
     return { ok: true, steps };
+  });
+
+  /*
+   * Double-clicking a title bar zooms the window. macOS does that for a drag
+   * region on its own; Windows does not, so the renderer asks for it explicitly.
+   */
+  ipcMain.handle('app:toggleMaximize', () => {
+    if (!window) return false;
+    if (window.isMaximized()) window.unmaximize();
+    else window.maximize();
+    return window.isMaximized();
   });
 
   ipcMain.handle('app:openExternal', (_e, url: string) => {

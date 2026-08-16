@@ -8,6 +8,22 @@ export function Dot({ tone }: { tone: 'green' | 'amber' | 'red' | 'grey' }) {
   return <span className={`dot ${tone}`} />;
 }
 
+/**
+ * The window's drag handle, on the platforms where the app draws its own title
+ * bar. Double-click zooms, which macOS gives a drag region for free but Windows
+ * does not — hence the explicit call.
+ */
+export function TitleBar() {
+  return (
+    <div
+      className="titlebar"
+      onDoubleClick={() => {
+        void api.app.toggleMaximize();
+      }}
+    />
+  );
+}
+
 export function StatusRow({
   label,
   tone,

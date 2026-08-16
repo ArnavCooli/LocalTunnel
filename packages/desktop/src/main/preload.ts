@@ -17,6 +17,8 @@ const api = {
     reset: () => ipcRenderer.invoke('app:reset'),
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
     pickPrivateKey: () => ipcRenderer.invoke('app:pickPrivateKey'),
+    toggleMaximize: () => ipcRenderer.invoke('app:toggleMaximize'),
+    platform: process.platform,
   },
   gateway: {
     list: () => ipcRenderer.invoke('gateway:list'),
@@ -97,5 +99,15 @@ const api = {
 };
 
 contextBridge.exposeInMainWorld('localtunnel', api);
+
+/*
+ * The stylesheet needs the platform before React mounts: the drag strip has to
+ * clear macOS's traffic lights but sit under Windows' controls overlay, and
+ * those are different insets. An attribute on <html> keeps that decision in CSS
+ * rather than threading it through the component tree.
+ */
+window.addEventListener('DOMContentLoaded', () => {
+  document.documentElement.dataset.platform = process.platform;
+});
 
 export type LocalTunnelApi = typeof api;
