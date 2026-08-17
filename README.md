@@ -42,7 +42,7 @@ packages/agent/      runs on your computer — outbound tunnel, local service pr
 packages/desktop/    Electron + React app for macOS, Windows and Linux
 packages/cli/        `localtunnel` — the terminal client, for headless Linux boxes
 installer/           install.sh + a sandboxed systemd unit
-scripts/             build tooling
+scripts/             build tooling + install-cli.sh, the one-line Linux installer
 ```
 
 ## Build and run from source
@@ -65,6 +65,25 @@ For a headless Linux box — a home server, a Pi, anything you only reach over S
 `localtunnel` does everything the desktop app does, gateway installation included.
 It is a full-screen menu driven with the arrow keys: no flags to memorise, no config
 file to write by hand.
+
+Install it on that machine with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/arnavko11/LocalTunnel/main/scripts/install-cli.sh | sh
+```
+
+[`scripts/install-cli.sh`](scripts/install-cli.sh) clones the repository, builds it,
+packs the gateway bundle the SSH flow uploads, and puts `localtunnel` on your PATH —
+`~/.local/bin` for a normal user, `/usr/local/bin` under `sudo`. Node 20+ is needed;
+where the machine has an older one or none, it downloads a private copy into the
+install directory and checks it against nodejs.org's `SHASUMS256.txt`, rather than
+changing what the rest of the system uses. The desktop app's Electron is skipped, so
+a bare server does not pull down a GUI toolkit it has no display for.
+
+Run it again to update, and `--uninstall` to remove it; `--help` lists the rest
+(`--dir`, `--bin-dir`, `--ref`, `--repo`, `--no-bundle`).
+
+From a checkout you already have:
 
 ```bash
 npm install && npm run build
