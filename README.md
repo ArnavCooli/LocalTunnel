@@ -12,9 +12,7 @@ You rent one small VPS. LocalTunnel installs a gateway on it over SSH, your comp
 dials out to that gateway and keeps the connection open, and your domain points at the
 VPS. No port forwarding, no reverse proxy to configure, no certificates to manage.
 
-**Not used anywhere in this project:** P2P, hole punching, mesh VPN, WireGuard mesh,
-Tailscale, Headscale, or Cloudflare Tunnel. Public traffic goes through a server you
-own and nowhere else. Cloudflare is supported as an optional *DNS* provider only.
+
 
 ## What works today
 
