@@ -89,7 +89,8 @@ jobs:
           # The gateway bundle is identical everywhere; publish the Linux copy only.
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then cp build/localtunnel-gateway.tar.gz artifacts/; fi
           # The combined multi-arch NSIS installer duplicates the per-arch ones.
-          rm -f artifacts/LocalTunnel-*[0-9].exe
+          # Matched by exact name: an arch-suffixed installer also ends in a digit.
+          rm -f "artifacts/LocalTunnel-$(node -p "require('./packages/desktop/package.json').version").exe"
           ls -l artifacts
 
       - uses: actions/upload-artifact@v4
