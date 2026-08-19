@@ -14,9 +14,20 @@ export function Diagnostics({
   services: ServiceView[];
   initialServiceId?: string | null;
 }) {
-  const [serviceId, setServiceId] = useState<string>(initialServiceId ?? services[0]?.id ?? '');
+  // A disabled service is not published, so there is no chain to check for it.
+  const checkable = services.filter((s) => s.enabled);
+  const [serviceId, setServiceId] = useState<string>(
+    pickServiceId(checkable, initialServiceId),
+  );
   const [results, setResults] = useState<CheckResult[] | null>(null);
   const [running, setRunning] = useState(false);
+
+  // If the selected service is disabled while this screen is open, drop back to
+  // the gateway-only check rather than checking something that is not published.
+  useEffect(() => {
+    if (serviceId && !checkable.some((s) => s.id === serviceId)) setServiceId('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services]);
 
   const run = async (id: string) => {
     setRunning(true);
@@ -46,12 +57,12 @@ export function Diagnostics({
       </p>
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 20 }}>
-        {services.length > 0 && (
+        {checkable.length > 0 && (
           <div className="field" style={{ flex: 1, marginBottom: 0 }}>
             <label>Check a service</label>
             <select value={serviceId} onChange={(e) => setServiceId(e.target.value)}>
               <option value="">Gateway and tunnel only</option>
-              {services.map((s) => (
+              {checkable.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} — {s.publicUrl ?? `${s.localHost}:${s.localPort}`}
                 </option>
@@ -120,6 +131,13 @@ export function Diagnostics({
       ))}
     </div>
   );
+}
+
+/** Only enabled services can be checked; anything else falls back to gateway-only. */
+function pickServiceId(checkable: ServiceView[], initialServiceId?: string | null): string {
+  if (initialServiceId && checkable.some((s) => s.id === initialServiceId)) return initialServiceId;
+  if (initialServiceId) return '';
+  return checkable[0]?.id ?? '';
 }
 
 function icon(state: CheckResult['state']): React.ReactNode {

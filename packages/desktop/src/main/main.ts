@@ -570,7 +570,8 @@ function registerIpc(): void {
     let service = null;
     if (serviceId && connection) {
       const services = (await gatewayApi.services(connection)).services;
-      service = services.find((s) => s.id === serviceId) ?? null;
+      // A disabled service is not published, so fall back to the gateway-only run.
+      service = services.find((s) => s.id === serviceId && s.enabled) ?? null;
     }
     return runDiagnostics({
       connection,

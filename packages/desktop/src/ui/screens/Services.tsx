@@ -577,9 +577,11 @@ function ManageService({
       )}
 
       <div className="btn-row">
-        <button className="btn" onClick={onDiagnose}>
-          Run diagnostics
-        </button>
+        {service.enabled && (
+          <button className="btn" onClick={onDiagnose}>
+            Run diagnostics
+          </button>
+        )}
         <button
           className="btn"
           disabled={busy}
