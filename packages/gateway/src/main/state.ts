@@ -105,7 +105,10 @@ export class Store {
 
   constructor(dataDir: string) {
     this.path = join(dataDir, 'state.json');
-    mkdirSync(dirname(this.path), { recursive: true });
+    // The state file holds machine identities and enrolment-token hashes. Its
+    // directory is the gateway's alone; the systemd unit sets the same mode, and
+    // this covers the case where the gateway is run outside it.
+    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     this.state = this.read();
   }
 

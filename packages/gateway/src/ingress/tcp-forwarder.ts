@@ -7,6 +7,16 @@ import type { ConnectionCounter } from '../auth/limits.js';
 import type { Firewall } from '../system/firewall.js';
 
 /**
+ * Concurrent UDP source addresses one public port will track.
+ *
+ * A datagram's source address is unverified, so a single sender can invent as
+ * many of them as it likes. Each one costs a tunnel stream, and streams are a
+ * per-machine budget shared with that machine's web services — without a cap
+ * here, a UDP flood takes the owner's websites down as collateral.
+ */
+const MAX_UDP_SESSIONS_PER_PORT = 256;
+
+/**
  * Layer-4 ingress for services that are not HTTP — a Minecraft server, an SSH
  * daemon, a game server. Each such service gets its own public port, opened and
  * closed by the gateway (including the host firewall rule) as services come and go.
@@ -55,11 +65,26 @@ export class TcpForwarder {
 
   private async openTcp(port: number): Promise<void> {
     const server = net.createServer((socket) => this.onConnection(port, socket));
+    // A port that cannot be bound — already in use, or privileged — must fail the
+    // reconcile rather than leave it awaiting a callback that will never fire.
+    const listening = await new Promise<boolean>((resolve) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        this.log.error('could not open public tcp port', { port, error: err.message });
+        server.close();
+        resolve(false);
+      };
+      server.once('error', onError);
+      server.listen(port, () => {
+        server.removeListener('error', onError);
+        resolve(true);
+      });
+    });
+    if (!listening) return;
+
     server.on('error', (err) => {
       this.log.error('tcp listener error', { port, error: err.message });
       this.listeners.delete(port);
     });
-    await new Promise<void>((resolve) => server.listen(port, resolve));
     this.listeners.set(port, server);
     await this.firewall.openPort(port, 'tcp');
     this.log.info('opened public tcp port', { port });
@@ -124,6 +149,10 @@ export class TcpForwarder {
       const key = `${rinfo.address}:${rinfo.port}`;
       let session = sessions.get(key);
       if (!session) {
+        if (sessions.size >= MAX_UDP_SESSIONS_PER_PORT) {
+          this.log.warn('udp session limit reached', { port, sources: sessions.size });
+          return;
+        }
         let stream;
         try {
           stream = this.registry.openStream(service.machineId, service.id, key);
@@ -161,7 +190,25 @@ export class TcpForwarder {
       session.stream.write(Buffer.concat([header, msg]));
     });
 
-    await new Promise<void>((resolve) => socket.bind(port, resolve));
+    const bound = await new Promise<boolean>((resolve) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        this.log.error('could not open public udp port', { port, error: err.message });
+        try {
+          socket.close();
+        } catch {
+          /* never bound */
+        }
+        resolve(false);
+      };
+      socket.once('error', onError);
+      socket.bind(port, () => {
+        socket.removeListener('error', onError);
+        resolve(true);
+      });
+    });
+    if (!bound) return;
+
+    socket.on('error', (err) => this.log.error('udp listener error', { port, error: err.message }));
     this.udpSockets.set(port, socket);
     await this.firewall.openPort(port, 'udp');
     this.log.info('opened public udp port', { port });

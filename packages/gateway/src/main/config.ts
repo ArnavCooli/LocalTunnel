@@ -7,7 +7,11 @@ export interface Limits {
   concurrentPerIp: number;
   /** Concurrent public connections across all sources. */
   concurrentTotal: number;
-  /** Concurrent tunnel streams one machine may have open. */
+  /**
+   * Concurrent tunnel streams one machine may have open. Must stay below the
+   * protocol's own `MAX_CONCURRENT_STREAMS` backstop (2048), which the
+   * multiplexer enforces on every connection regardless of this setting.
+   */
   streamsPerMachine: number;
   /** Failed enrolment attempts per IP per 15 minutes. */
   enrollFailuresPerIp: number;

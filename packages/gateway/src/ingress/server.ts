@@ -5,6 +5,7 @@ import {
   FrameType,
   HEADER_SIZE,
   PROTOCOL_VERSION,
+  isValidHostname,
   type HelloMessage,
 } from '@localtunnel/protocol';
 import type { GatewayConfig } from '../main/config.js';
@@ -101,16 +102,18 @@ export class IngressServer {
   private async listenPlainHttp(): Promise<void> {
     const { config, log, certificates } = this.deps;
     this.httpServer = http.createServer((req, res) => {
-      const path = req.url ?? '/';
-      const challenge = certificates.challengeResponse(path);
-      if (challenge) {
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end(challenge);
-        return;
+      try {
+        this.servePlainHttp(req, res, certificates);
+      } catch (err) {
+        log.warn('plain http request failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!res.headersSent) res.writeHead(400);
+        res.end();
       }
-      const host = (req.headers.host ?? '').split(':')[0];
-      res.writeHead(301, { location: `https://${host}${path}` });
-      res.end();
+    });
+    this.httpServer.on('clientError', (_err, socket) => {
+      if (!socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n');
     });
     this.httpServer.on('error', (err) => log.error('http listener error', { error: err.message }));
     await new Promise<void>((resolve, reject) => {
@@ -122,13 +125,63 @@ export class IngressServer {
     });
   }
 
+  /** ACME http-01 challenges, and the redirect for visitors who typed `http://`. */
+  private servePlainHttp(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    certificates: CertificateManager,
+  ): void {
+    const path = req.url ?? '/';
+    const challenge = certificates.challengeResponse(path);
+    if (challenge) {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(challenge);
+      return;
+    }
+
+    /*
+     * Redirect to the same name over HTTPS — but only if the request really did
+     * name one of ours. `Host` and the request target are both attacker
+     * controlled: reflecting them unchecked is an open redirect, and a value
+     * Node's response writer rejects would throw out of this handler.
+     */
+    const host = (req.headers.host ?? '').split(':')[0].toLowerCase();
+    if (!isValidHostname(host) || !certificates.serves(host)) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('No service is published at this address.\n');
+      return;
+    }
+    res.writeHead(301, { location: `https://${host}${safeRequestTarget(path)}` });
+    res.end();
+  }
+
   private onSecureConnection(socket: TLSSocket): void {
     const { log, config, connections } = this.deps;
     const ip = socket.remoteAddress?.replace(/^::ffff:/, '') ?? 'unknown';
 
     if (!this.newConnections.allow(ip)) {
-      log.warn('connection rate limit', { ip });
-      socket.destroy();
+      log.warn('connection rate limit', { ip, alpn: socket.alpnProtocol || 'none' });
+      /*
+       * Say why, where the protocol allows it.
+       *
+       * A silent destroy reaches the other end as a bare ECONNRESET, which is
+       * indistinguishable from a crash, a network fault or a bug — for the
+       * visitor, for the operator reading a report, and for whoever is trying
+       * to work out why an occasional request fails. Ordinary web traffic gets
+       * a 429; the tunnel, enrol and admin ALPNs are not HTTP, so those still
+       * close, but the log line above now records which one it was.
+       */
+      const alpn = socket.alpnProtocol;
+      if (alpn === ALPN.tunnel || alpn === ALPN.enroll || alpn === ALPN.admin) {
+        socket.destroy();
+      } else {
+        socket.end(
+          'HTTP/1.1 429 Too Many Requests\r\n' +
+            'retry-after: 60\r\n' +
+            'connection: close\r\n' +
+            'content-length: 0\r\n\r\n',
+        );
+      }
       return;
     }
 
@@ -251,6 +304,20 @@ export class IngressServer {
     this.tlsServer?.close();
     this.httpServer?.close();
   }
+}
+
+/**
+ * A request target safe to put in a Location header.
+ *
+ * Node's HTTP parser is more permissive about the request line than its response
+ * writer is about header values, so anything outside the printable-ASCII range
+ * that a URL may legally contain is percent-encoded rather than reflected.
+ */
+function safeRequestTarget(target: string): string {
+  if (!target.startsWith('/')) return '/';
+  return target.replace(/[^A-Za-z0-9\-._~!$&'()*+,;=:@/?%[\]]/g, (c) =>
+    Array.from(Buffer.from(c, 'utf8'), (b) => `%${b.toString(16).padStart(2, '0').toUpperCase()}`).join(''),
+  );
 }
 
 function pemFromPeer(peer: tls.PeerCertificate | undefined): string {

@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform, arch } from 'node:os';
 import { join } from 'node:path';
@@ -39,12 +40,35 @@ export class Identity {
   private readonly dir: string;
   private readonly keyPath: string;
   private readonly credentialsPath: string;
+  private readonly controlKeyPath: string;
 
   constructor(dir = agentDataDir()) {
     this.dir = dir;
     this.keyPath = join(dir, 'agent.key');
     this.credentialsPath = join(dir, 'credentials.json');
+    this.controlKeyPath = join(dir, 'control.key');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+
+  /**
+   * The secret that authorises a local client to drive this agent.
+   *
+   * Talking to the agent means being able to enrol this computer with a gateway,
+   * start and stop tunnels, and wipe its identity — so the IPC socket needs an
+   * answer to "which local process is this?", not just "is it local?". The secret
+   * lives beside the private key in a 0700 directory, so reading it already means
+   * having the user's own file access. Generated on first use and reused after.
+   */
+  controlSecret(): string {
+    try {
+      const existing = readFileSync(this.controlKeyPath, 'utf8').trim();
+      if (existing.length >= 32) return existing;
+    } catch {
+      /* not created yet */
+    }
+    const secret = randomBytes(32).toString('base64url');
+    writeFileSync(this.controlKeyPath, `${secret}\n`, { mode: 0o600 });
+    return secret;
   }
 
   get dataDir(): string {
@@ -102,14 +126,35 @@ export class Identity {
    */
   reset(): void {
     this.clearCredentials();
-    try {
-      unlinkSync(this.keyPath);
-    } catch {
-      /* already gone */
+    for (const path of [this.keyPath, this.controlKeyPath]) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* already gone */
+      }
     }
   }
 
   describe(): { hostname: string; os: string; arch: string } {
     return { hostname: hostname(), os: platform(), arch: arch() };
   }
+}
+
+/** Constant-time comparison for the agent's local control secret. */
+export function secretsMatch(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  if (left.length !== right.length || left.length === 0) return false;
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * Read (creating if necessary) the local control secret for an agent directory.
+ *
+ * The desktop app and the terminal client both need it to talk to the agent, and
+ * both already run as the user who owns that directory — which is exactly the
+ * property the secret is standing in for.
+ */
+export function controlSecret(dir = agentDataDir()): string {
+  return new Identity(dir).controlSecret();
 }

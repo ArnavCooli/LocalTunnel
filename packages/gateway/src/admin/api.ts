@@ -192,7 +192,14 @@ export class AdminApi {
         if (typeof body.localPort === 'number' && isValidPort(body.localPort)) {
           patch.localPort = body.localPort;
         }
-        if (typeof body.localHost === 'string') patch.localHost = body.localHost;
+        if (typeof body.localHost === 'string') {
+          // The same check create applies. Without it, an address rejected at
+          // creation could simply be patched in afterwards.
+          if (!isValidLocalHost(body.localHost)) {
+            return json(res, 400, { error: 'localHost is not a valid address' }), true;
+          }
+          patch.localHost = body.localHost;
+        }
         const updated = store.updateService(id, patch)!;
         if (updated.hostname && updated.enabled) void certificates.ensure(updated.hostname);
         await forwarder.reconcile();
@@ -226,6 +233,14 @@ export class AdminApi {
     const issueMatch = /^\/v1\/certificates\/([a-z0-9.-]+)\/issue$/i.exec(path);
     if (method === 'POST' && issueMatch) {
       const hostname = issueMatch[1].toLowerCase();
+      if (!isValidHostname(hostname)) {
+        return json(res, 400, { error: 'that is not a valid hostname' }), true;
+      }
+      // Only names this gateway actually publishes. Otherwise the endpoint is a
+      // way to spend the server's ACME rate limit on arbitrary domains.
+      if (!store.certificateHostnames().includes(hostname)) {
+        return json(res, 404, { error: 'no service on this gateway uses that hostname' }), true;
+      }
       certificates.forget(hostname);
       await certificates.ensure(hostname);
       json(res, 200, { certificate: certificates.status(hostname) });
@@ -388,6 +403,17 @@ function temporaryHostname(config: GatewayConfig): string {
   return `${label}.${config.publicIp}.sslip.io`.toLowerCase();
 }
 
+/**
+ * Addresses the agent may be asked to dial.
+ *
+ * Deliberately narrow: an IP, or a hostname the agent's own address policy will
+ * classify. The agent enforces the real rule (loopback, or LAN with an explicit
+ * opt-in); this keeps obvious nonsense out of the state file in the first place.
+ */
+function isValidLocalHost(value: string): boolean {
+  return value.length > 0 && value.length <= 253 && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
 function validateService(
   body: Record<string, unknown>,
   store: Store,
@@ -404,7 +430,7 @@ function validateService(
   const localPort = Number(body.localPort);
   if (!isValidPort(localPort)) return { error: 'localPort must be between 1 and 65535' };
   const localHost = String(body.localHost ?? '127.0.0.1');
-  if (!/^[\w.:-]+$/.test(localHost)) return { error: 'localHost is not a valid address' };
+  if (!isValidLocalHost(localHost)) return { error: 'localHost is not a valid address' };
 
   let hostname = body.hostname ? String(body.hostname).toLowerCase() : null;
   const publicPort = body.publicPort == null ? null : Number(body.publicPort);
@@ -427,8 +453,12 @@ function validateService(
     if (publicPort === null || !isValidPort(publicPort)) {
       return { error: 'a public port is required for TCP and UDP services' };
     }
-    if (publicPort === 80 || publicPort === 443) {
-      return { error: 'ports 80 and 443 are reserved for the gateway itself' };
+    // The gateway's own ports — both the well-known pair the installer opens and
+    // whatever this gateway is actually configured with. Publishing a service on
+    // one of them would either fail to bind or shadow the gateway itself.
+    const reserved = new Set([80, 443, config.httpsPort, config.httpPort]);
+    if (reserved.has(publicPort)) {
+      return { error: `port ${publicPort} is reserved for the gateway itself` };
     }
     const clash = store.serviceByPublicPort(publicPort);
     if (clash) return { error: `port ${publicPort} is already used by "${clash.name}"` };

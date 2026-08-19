@@ -15,7 +15,9 @@ export type AddressPolicy = 'loopback' | 'lan' | 'denied';
  * into the user's home network.
  */
 export function classifyAddress(host: string): AddressPolicy {
-  const lower = host.toLowerCase();
+  // An IPv4-mapped IPv6 address is an IPv4 address wearing a hat; classify the
+  // address it actually names rather than falling through to the v6 branch.
+  const lower = host.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
   if (lower === 'localhost' || lower === '127.0.0.1' || lower === '::1') return 'loopback';
 
   if (isIP(lower) === 4) {
@@ -31,8 +33,11 @@ export function classifyAddress(host: string): AddressPolicy {
   }
 
   if (isIP(lower) === 6) {
+    if (lower === '::' || lower === '::1') return lower === '::1' ? 'loopback' : 'denied';
     if (lower.startsWith('fe80')) return 'denied';
     if (lower.startsWith('fc') || lower.startsWith('fd')) return 'lan';
+    // Everything else in v6 — including global unicast — is off the map for a
+    // product whose whole point is exposing something on *this* network.
     return 'denied';
   }
 
@@ -60,6 +65,32 @@ export function assertAllowed(service: ServiceDescriptor): void {
   }
 }
 
+/**
+ * Check where a connection actually landed.
+ *
+ * `classifyAddress` runs on the string the gateway sent, which is not necessarily
+ * where the socket ends up: a name resolves through DNS, and `0x7f.1` or
+ * `2852039166` are addresses the resolver accepts but the classifier reads as
+ * hostnames. Re-checking the peer the kernel actually connected to is what makes
+ * the metadata and link-local block hold, rather than being a spelling test.
+ */
+function assertPeerAllowed(service: ServiceDescriptor, peer: string | undefined): void {
+  if (!peer) return;
+  const policy = classifyAddress(peer.replace(/^::ffff:/, ''));
+  if (policy === 'denied') {
+    throw new PolicyError(
+      `${service.localHost} resolves to ${peer}, which LocalTunnel will not expose ` +
+        '(link-local, multicast and metadata addresses are blocked).',
+    );
+  }
+  if (policy === 'lan' && !service.allowLanTarget) {
+    throw new PolicyError(
+      `${service.localHost} resolves to ${peer}, another device on your network. ` +
+        'Enable "allow LAN target" for this service to expose it.',
+    );
+  }
+}
+
 /** Dial the local service and pipe it to the tunnel stream. */
 export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -73,6 +104,13 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
 
     socket.once('connect', () => {
       clearTimeout(timer);
+      try {
+        assertPeerAllowed(service, socket.remoteAddress);
+      } catch (err) {
+        socket.destroy();
+        reject(err as Error);
+        return;
+      }
       socket.setNoDelay(true);
       socket.pipe(stream);
       stream.pipe(socket);
@@ -120,6 +158,11 @@ export function probe(service: ServiceDescriptor): Promise<ServiceProbe> {
     const finish = (result: ServiceProbe) => {
       clearTimeout(timer);
       socket.removeAllListeners();
+      // Destroying a socket does not stop an error already on its way — an RST
+      // from the far end, say. With every listener removed that error would be
+      // unhandled, and an unhandled 'error' on a socket ends the process, so the
+      // probe keeps one no-op handler for exactly that window.
+      socket.on('error', () => {});
       socket.destroy();
       resolve(result);
     };
@@ -128,7 +171,15 @@ export function probe(service: ServiceDescriptor): Promise<ServiceProbe> {
       PROBE_TIMEOUT_MS,
     );
 
-    socket.once('connect', () => finish({ reachable: true, latencyMs: Date.now() - started }));
+    socket.once('connect', () => {
+      try {
+        assertPeerAllowed(service, socket.remoteAddress);
+      } catch (err) {
+        finish({ reachable: false, error: (err as Error).message });
+        return;
+      }
+      finish({ reachable: true, latencyMs: Date.now() - started });
+    });
     socket.once('error', (err) => {
       const code = (err as NodeJS.ErrnoException).code;
       finish({

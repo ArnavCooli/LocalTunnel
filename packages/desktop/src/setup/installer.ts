@@ -1,7 +1,9 @@
+import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { Client, type ConnectConfig } from 'ssh2';
 import { agentSocket, secureKeyFile } from './ssh-keys.js';
+import { HostKeyChangedError, KnownHosts } from './known-hosts.js';
 
 /**
  * Installs the gateway on the user's VPS over SSH.
@@ -92,6 +94,14 @@ export type InstallEvent =
 export class GatewayInstaller extends EventEmitter {
   private client: Client | null = null;
 
+  /**
+   * Where SSH host keys are remembered. The app supplies one; passing null keeps
+   * the old accept-anything behaviour and is only for tests that have no store.
+   */
+  constructor(private readonly knownHosts: KnownHosts | null = null) {
+    super();
+  }
+
   async run(target: InstallTarget): Promise<InstallResult> {
     this.validate(target);
     const client = new Client();
@@ -137,14 +147,15 @@ export class GatewayInstaller extends EventEmitter {
       this.step('verify-internet', 'done');
 
       this.step('upload', 'running');
-      await this.upload(client, target.gatewayBundlePath, '/tmp/localtunnel-gateway.tar.gz');
-      await this.upload(client, target.installerScriptPath, '/tmp/localtunnel-install.sh');
-      await this.upload(client, target.serviceUnitPath, '/tmp/localtunnel-gateway.service');
+      const staging = await this.stagingDir(client);
+      await this.upload(client, target.gatewayBundlePath, `${staging}/localtunnel-gateway.tar.gz`);
+      await this.upload(client, target.installerScriptPath, `${staging}/install.sh`);
+      await this.upload(client, target.serviceUnitPath, `${staging}/localtunnel-gateway.service`);
       this.step('upload', 'done');
 
       // The remaining steps happen inside install.sh, which streams progress lines
       // back. Mapping its "Step N/13" markers onto the UI keeps one source of truth.
-      const result = await this.runInstaller(client, target);
+      const result = await this.runInstaller(client, target, staging);
 
       this.step('verify-public', 'running');
       const listening = await this.exec(client, "ss -ltn | grep -c ':443 ' || true");
@@ -221,18 +232,19 @@ export class GatewayInstaller extends EventEmitter {
       this.emit('event', { type: 'step', key: 'connect', label: 'Connecting over SSH', state: 'done' });
 
       say('taking over the gateway already on this server');
-      await this.upload(client, target.adoptScriptPath, '/tmp/localtunnel-adopt.sh');
+      const staging = await this.stagingDir(client);
+      await this.upload(client, target.adoptScriptPath, `${staging}/adopt.sh`);
 
       const command = [
         'set -e',
+        `trap 'rm -rf ${shellQuote(staging)}' EXIT`,
         'if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi',
-        '$SUDO sh /tmp/localtunnel-adopt.sh',
-        'rm -f /tmp/localtunnel-adopt.sh',
+        `$SUDO sh ${shellQuote(`${staging}/adopt.sh`)}`,
       ].join('\n');
 
       const { code, stdout, stderr } = await this.exec(client, command);
       for (const line of `${stdout}\n${stderr}`.split('\n')) {
-        if (line.trim()) say(line.trimEnd());
+        if (line.trim()) say(redactSecrets(line.trimEnd()));
       }
 
       const marker = /^LOCALTUNNEL_ADOPT (.+)$/m.exec(stdout);
@@ -267,6 +279,31 @@ export class GatewayInstaller extends EventEmitter {
     }
   }
 
+  /**
+   * Make a private directory on the server to stage uploads in.
+   *
+   * The files put here are run as root moments later, so a fixed path under
+   * /tmp is a gift to any other account on that box: pre-create it, or the file
+   * inside it, and the installer hands your content to sudo. A name nobody can
+   * predict, created with `mkdir` (which fails on an existing path) and mode
+   * 0700, closes both the symlink and the swap-it-before-it-runs races.
+   */
+  private async stagingDir(client: Client): Promise<string> {
+    const dir = `/tmp/lt-install-${randomBytes(12).toString('hex')}`;
+    const { code, stderr } = await this.exec(
+      client,
+      // No -p: on an existing path this must fail rather than adopt it.
+      `umask 077 && mkdir ${dir} && chmod 700 ${dir} && echo staged`,
+    );
+    if (code !== 0) {
+      throw new InstallError(
+        'Could not create a private working directory on your server.',
+        stderr.trim() || 'Check that /tmp is writable and has free space.',
+      );
+    }
+    return dir;
+  }
+
   private validate(target: InstallTarget): void {
     if (!target.host.trim()) throw new InstallError('Enter your server\'s public IP address.');
     if (!target.username.trim()) throw new InstallError('Enter the SSH username (usually "ubuntu").');
@@ -291,14 +328,37 @@ export class GatewayInstaller extends EventEmitter {
 
   private connect(client: Client, target: InstallTarget): Promise<void> {
     return new Promise((resolve, reject) => {
+      let hostKeyError: Error | null = null;
       const config: ConnectConfig = {
         host: target.host,
         port: target.port || 22,
         username: target.username,
         readyTimeout: 25_000,
-        // Trust on first use: the user just created this machine and typed its IP.
-        // The gateway's own identity is pinned separately, after install.
-        hostVerifier: () => true,
+        /*
+         * Trust on first use, and only on first use.
+         *
+         * Everything the app later relies on — the admin token, the gateway
+         * certificate fingerprint it pins — is learned over this session, so
+         * accepting any key every time would let anyone on the path substitute
+         * their own gateway and have the app pin it. The key is recorded the
+         * first time this server is seen and required to match afterwards.
+         */
+        hostVerifier: (key: Buffer) => {
+          if (!this.knownHosts) return true;
+          try {
+            const verdict = this.knownHosts.verify(target.host, target.port || 22, key);
+            this.emit('event', {
+              type: 'output',
+              line: verdict.firstUse
+                ? `host key pinned: SHA256:${verdict.fingerprint}`
+                : `host key matches the one recorded for ${target.host}`,
+            });
+            return true;
+          } catch (err) {
+            hostKeyError = err instanceof Error ? err : new Error(String(err));
+            return false;
+          }
+        },
       };
 
       // Prefer the agent: the private key stays inside it and is never read by
@@ -314,7 +374,20 @@ export class GatewayInstaller extends EventEmitter {
       }
 
       client.once('ready', resolve);
-      client.once('error', (err) => reject(translateSshError(err, target)));
+      client.once('error', (err) => {
+        // A rejected host key surfaces from ssh2 as a generic handshake failure,
+        // so the real reason is carried out of the verifier rather than lost.
+        const rejected: Error | null = hostKeyError;
+        if (rejected) {
+          reject(
+            rejected instanceof HostKeyChangedError
+              ? new InstallError(rejected.message, 'Nothing was uploaded or changed.')
+              : rejected,
+          );
+          return;
+        }
+        reject(translateSshError(err, target));
+      });
       client.connect(config);
     });
   }
@@ -360,7 +433,7 @@ export class GatewayInstaller extends EventEmitter {
   }
 
   /** Run install.sh with sudo, mapping its progress markers onto the UI's steps. */
-  private runInstaller(client: Client, target: InstallTarget): Promise<InstallResult> {
+  private runInstaller(client: Client, target: InstallTarget, staging: string): Promise<InstallResult> {
     const scriptStepToKey: Record<string, string> = {
       '4': 'dependencies',
       '5': 'upload',
@@ -373,26 +446,32 @@ export class GatewayInstaller extends EventEmitter {
     };
 
     const flags = [
-      '--bundle /tmp/localtunnel-gateway.tar.gz',
+      `--bundle ${shellQuote(`${staging}/localtunnel-gateway.tar.gz`)}`,
       `--public-ip ${shellQuote(target.host)}`,
       `--name ${shellQuote(target.gatewayName)}`,
     ];
     if (target.contactEmail) flags.push(`--email ${shellQuote(target.contactEmail)}`);
     if (target.acmeDirectoryUrl) flags.push(`--acme-directory ${shellQuote(target.acmeDirectoryUrl)}`);
 
-    // install.sh reads its systemd unit from its own directory, so both files are
-    // staged together under /tmp/lt-installer with the names the script expects.
-    // `sudo -n` never waits for a password: on an image without passwordless sudo
-    // it fails immediately with a message we can turn into a real explanation,
-    // rather than hanging on a prompt that has no terminal to appear on.
+    /*
+     * install.sh reads its systemd unit from its own directory, so both files
+     * were uploaded into the private staging directory under the names it
+     * expects. Running them straight from there means there is no copy step and
+     * no second, predictable path for another account on the server to get in
+     * front of between the upload and the sudo.
+     *
+     * `sudo -n` never waits for a password: on an image without passwordless
+     * sudo it fails immediately with a message we can turn into a real
+     * explanation, rather than hanging on a prompt with no terminal to appear on.
+     */
     const command = [
       'set -e',
-      'mkdir -p /tmp/lt-installer',
-      'cp /tmp/localtunnel-install.sh /tmp/lt-installer/install.sh',
-      'cp /tmp/localtunnel-gateway.service /tmp/lt-installer/localtunnel-gateway.service',
-      'chmod +x /tmp/lt-installer/install.sh',
+      // The trap runs on failure too, so a stopped install does not leave the
+      // uploaded bundle sitting on the server.
+      `trap 'rm -rf ${shellQuote(staging)}' EXIT`,
+      `chmod 700 ${shellQuote(`${staging}/install.sh`)}`,
       'if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -n"; fi',
-      `$SUDO bash /tmp/lt-installer/install.sh ${flags.join(' ')}`,
+      `$SUDO bash ${shellQuote(`${staging}/install.sh`)} ${flags.join(' ')}`,
     ].join('\n');
 
     return new Promise((resolve, reject) => {
@@ -409,8 +488,8 @@ export class GatewayInstaller extends EventEmitter {
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
           for (const line of lines) {
-            if (line.trim()) transcript.push(line.trim());
-            this.emit('event', { type: 'output', line: line.trimEnd() });
+            if (line.trim()) transcript.push(redactSecrets(line.trim()));
+            this.emit('event', { type: 'output', line: redactSecrets(line.trimEnd()) });
 
             const marker = /^==> Step (\d+)\/13:/.exec(line.trim());
             if (marker) {
@@ -526,6 +605,7 @@ export interface UninstallResult {
 export function uninstallGateway(
   target: UninstallTarget,
   onOutput?: (line: string) => void,
+  knownHosts?: KnownHosts | null,
 ): Promise<UninstallResult> {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -593,14 +673,29 @@ export function uninstallGateway(
         });
       });
     });
-    client.once('error', (err) => reject(translateSshError(err as NodeJS.ErrnoException, target as InstallTarget)));
+    let hostKeyError: Error | null = null;
+    client.once('error', (err) => {
+      if (hostKeyError) return reject(hostKeyError);
+      reject(translateSshError(err as NodeJS.ErrnoException, target as InstallTarget));
+    });
 
     const config: ConnectConfig = {
       host: target.host,
       port: target.port || 22,
       username: target.username,
       readyTimeout: 25_000,
-      hostVerifier: () => true,
+      // The same trust-on-first-use rule the install path uses. A server whose
+      // key has changed is not one to hand a root shell to, even to tidy up.
+      hostVerifier: (key: Buffer) => {
+        if (!knownHosts) return true;
+        try {
+          knownHosts.verify(target.host, target.port || 22, key);
+          return true;
+        } catch (err) {
+          hostKeyError = err instanceof Error ? err : new Error(String(err));
+          return false;
+        }
+      },
     };
     if (target.useAgent) config.agent = agentSocket() ?? undefined;
     if (target.privateKeyPath) {
@@ -651,6 +746,22 @@ function translateSshError(err: NodeJS.ErrnoException, target: InstallTarget): I
     );
   }
   return new InstallError(message || 'The SSH connection failed.');
+}
+
+/**
+ * Keep the admin token out of the install transcript.
+ *
+ * The scripts hand their result back on stdout, and that result contains the
+ * gateway's admin token — the one credential that grants full control of it. The
+ * transcript is shown on screen, kept in memory for error reporting, and is
+ * exactly the thing someone pastes into a bug report, so the marker lines are
+ * parsed for their value and shown redacted.
+ */
+export function redactSecrets(line: string): string {
+  return line.replace(
+    /^(LOCALTUNNEL_(?:RESULT|ADOPT) ).*$/,
+    '$1{ … redacted: contains this gateway\'s admin token … }',
+  );
 }
 
 function shellQuote(value: string): string {

@@ -139,36 +139,45 @@ ADMIN_HASH="$(printf '%s' "$ADMIN_TOKEN" | node -e '
   });')"
 GATEWAY_ID="gw_$(node -e 'process.stdout.write(require("crypto").randomBytes(8).toString("hex"))')"
 
-cat > "$CONFIG_DIR/gateway.json" <<JSON
-{
-  "gatewayId": "$GATEWAY_ID",
-  "name": "$GATEWAY_NAME",
-  "publicIp": "$PUBLIC_IP",
-  "httpsPort": 443,
-  "httpPort": 80,
-  "dataDir": "$STATE_DIR",
-  "logFile": "$LOG_DIR/gateway.log",
-  "logLevel": "info",
-  "adminTokenHash": "$ADMIN_HASH",
-  "tls": {
-    "mode": "$TLS_MODE",
-    "acmeDirectoryUrl": "$ACME_DIRECTORY",
-    "contactEmail": $([ -n "$CONTACT_EMAIL" ] && printf '"%s"' "$CONTACT_EMAIL" || printf 'null'),
-    "renewBeforeDays": 30
-  },
-  "firewall": { "manage": true },
-  "limits": {
-    "connectionsPerIpPerMinute": 60,
-    "concurrentPerIp": 128,
-    "concurrentTotal": 8192,
-    "streamsPerMachine": 512,
-    "enrollFailuresPerIp": 5,
-    "adminFailuresPerIp": 5,
-    "tlsHandshakeTimeoutMs": 10000,
-    "idleConnectionTimeoutMs": 120000
-  }
-}
-JSON
+# The config is built by node rather than by a heredoc: the gateway name and
+# contact email are free text typed by a person, and pasting them into JSON
+# unescaped means a stray quote either corrupts the file or, worse, injects a
+# key of its own — adminTokenHash included. JSON.stringify is the escaping.
+node -e '
+  const fs = require("fs");
+  const [gatewayId, name, publicIp, stateDir, logDir, adminHash, tlsMode, acmeUrl, email, out] =
+    process.argv.slice(1);
+  const config = {
+    gatewayId,
+    name,
+    publicIp,
+    httpsPort: 443,
+    httpPort: 80,
+    dataDir: stateDir,
+    logFile: `${logDir}/gateway.log`,
+    logLevel: "info",
+    adminTokenHash: adminHash,
+    tls: {
+      mode: tlsMode,
+      acmeDirectoryUrl: acmeUrl,
+      contactEmail: email || null,
+      renewBeforeDays: 30,
+    },
+    firewall: { manage: true },
+    limits: {
+      connectionsPerIpPerMinute: 60,
+      concurrentPerIp: 128,
+      concurrentTotal: 8192,
+      streamsPerMachine: 512,
+      enrollFailuresPerIp: 5,
+      adminFailuresPerIp: 5,
+      tlsHandshakeTimeoutMs: 10000,
+      idleConnectionTimeoutMs: 120000,
+    },
+  };
+  fs.writeFileSync(out, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o640 });
+' "$GATEWAY_ID" "$GATEWAY_NAME" "$PUBLIC_IP" "$STATE_DIR" "$LOG_DIR" "$ADMIN_HASH" \
+  "$TLS_MODE" "$ACME_DIRECTORY" "$CONTACT_EMAIL" "$CONFIG_DIR/gateway.json"
 chmod 640 "$CONFIG_DIR/gateway.json"
 chown root:"$SERVICE_USER" "$CONFIG_DIR/gateway.json"
 
@@ -250,20 +259,32 @@ log "Step 12/13: starting the gateway"
 # behind a generic unit failure. Run as the service user on unprivileged ports:
 # binding 443 needs the capability that only the systemd unit grants, so testing
 # the real ports here would fail for a reason that says nothing about the install.
-SMOKE_LOG=/tmp/lt-smoke.log
-SMOKE_CONF=/tmp/lt-smoke-gateway.json
+# This runs as root, so the scratch files must not be at a path another account
+# on this server could have created first: a symlink at a predictable /tmp name
+# turns the truncate below into an arbitrary-file overwrite. mktemp -d gives a
+# fresh 0700 directory, and the service user is let in through the group rather
+# than by making anything world-writable.
+SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lt-smoke.XXXXXXXXXX")"
+trap 'rm -rf "$SMOKE_DIR"' EXIT
+chown "root:$SERVICE_USER" "$SMOKE_DIR" 2>/dev/null || chown ":$SERVICE_USER" "$SMOKE_DIR" 2>/dev/null || true
+chmod 750 "$SMOKE_DIR"
+SMOKE_LOG="$SMOKE_DIR/smoke.log"
+SMOKE_CONF="$SMOKE_DIR/gateway.json"
+
 node -e '
   const fs = require("fs");
   const c = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   c.httpsPort = 18443; c.httpPort = 18080;
   c.firewall = { manage: false };
   c.logFile = null;
-  fs.writeFileSync(process.argv[2], JSON.stringify(c, null, 2));
+  fs.writeFileSync(process.argv[2], JSON.stringify(c, null, 2), { mode: 0o640 });
 ' "$CONFIG_DIR/gateway.json" "$SMOKE_CONF"
-chmod 644 "$SMOKE_CONF"
+chown "root:$SERVICE_USER" "$SMOKE_CONF" 2>/dev/null || true
+chmod 640 "$SMOKE_CONF"
 
 : > "$SMOKE_LOG"
-chmod 666 "$SMOKE_LOG"
+chown "root:$SERVICE_USER" "$SMOKE_LOG" 2>/dev/null || true
+chmod 660 "$SMOKE_LOG"
 sudo -u "$SERVICE_USER" node "$PREFIX/gateway/dist/main/index.js" "$SMOKE_CONF" >> "$SMOKE_LOG" 2>&1 &
 SMOKE_PID=$!
 for _ in $(seq 1 30); do
@@ -301,14 +322,17 @@ if command -v ss >/dev/null 2>&1; then
 fi
 log "    the gateway is listening"
 
-cat > "$PREFIX/uninstall.sh" <<'UNINSTALL'
+# The paths are baked in at write time. Quoting the heredoc marker (as this once
+# did) leaves $SYSTEMD_DIR unexpanded, and `set -u` then aborts the script on its
+# first line — so "uninstall" would report success while removing nothing.
+cat > "$PREFIX/uninstall.sh" <<UNINSTALL
 #!/usr/bin/env bash
 set -euo pipefail
 systemctl disable --now localtunnel-gateway 2>/dev/null || true
-rm -f "$SYSTEMD_DIR"/localtunnel-gateway.service
+rm -f "$SYSTEMD_DIR/localtunnel-gateway.service"
 systemctl daemon-reload
-rm -rf /opt/localtunnel /etc/localtunnel /var/lib/localtunnel /var/log/localtunnel
-userdel localtunnel 2>/dev/null || true
+rm -rf "$PREFIX" "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+userdel $SERVICE_USER 2>/dev/null || true
 echo "LocalTunnel Gateway removed."
 UNINSTALL
 chmod 755 "$PREFIX/uninstall.sh"

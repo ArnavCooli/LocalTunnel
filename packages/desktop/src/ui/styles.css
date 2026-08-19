@@ -1404,3 +1404,50 @@ html[data-platform="win32"] .page {
 .app-rail a {
   -webkit-app-region: no-drag;
 }
+
+/* ---------------------------------------------------------------- updates */
+
+/*
+ * The update banner sits above the page content rather than floating over it:
+ * a new version is worth mentioning once, not worth covering the thing the
+ * user came to do. It only renders when an update actually exists.
+ */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  padding: var(--s2) var(--s3);
+  margin-bottom: var(--s3);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  border: 0.5px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-size: var(--text-body);
+  color: var(--text);
+}
+.update-banner strong {
+  font-weight: 600;
+}
+.update-banner-actions {
+  display: flex;
+  gap: var(--s2);
+  flex-shrink: 0;
+}
+
+/*
+ * Release notes come from a public API, so they are shown as preformatted
+ * text — wrapped, scrollable, and never parsed as markup.
+ */
+.release-notes {
+  margin: 0;
+  max-height: 15rem;
+  overflow: auto;
+  padding: var(--s3);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font: var(--text-caption) / 1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

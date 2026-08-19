@@ -80,11 +80,18 @@ export function remoteExec(target: SshTarget, command: string, onOutput: OnOutpu
  */
 export function remoteScript(target: SshTarget, script: string, onOutput: OnOutput): Promise<RemoteResult> {
   const encoded = Buffer.from(script, 'utf8').toString('base64');
+  // The script is about to be run as root, so it must not land at a path another
+  // account on that server could have created first — a symlink at a predictable
+  // /tmp name, or a file swapped in between the write and the sudo. `mktemp`
+  // gives a fresh name nobody can guess, created 0600 under the caller's umask.
   const command = [
-    `printf %s '${encoded}' | base64 -d > /tmp/lt-cli-step.sh`,
+    'set -e',
+    'umask 077',
+    'LT_STEP="$(mktemp "${TMPDIR:-/tmp}/lt-cli-step.XXXXXXXXXX")"',
+    'trap \'rm -f "$LT_STEP"\' EXIT',
+    `printf %s '${encoded}' | base64 -d > "$LT_STEP"`,
     'if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi',
-    '$SUDO bash /tmp/lt-cli-step.sh; STATUS=$?',
-    'rm -f /tmp/lt-cli-step.sh',
+    '$SUDO bash "$LT_STEP"; STATUS=$?',
     'exit $STATUS',
   ].join('\n');
   return run(

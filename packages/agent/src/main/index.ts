@@ -6,7 +6,8 @@ import { startIpcServer, ipcPath, anotherAgentIsRunning, claimIpcSocket } from '
 export { TunnelClient } from '../tunnel/client.js';
 export { Identity, agentDataDir } from '../auth/identity.js';
 export { enroll } from '../auth/enroll.js';
-export { ipcPath, anotherAgentIsRunning, claimIpcSocket } from './ipc.js';
+export { ipcPath, anotherAgentIsRunning, claimIpcSocket, CONTROL_HEADER } from './ipc.js';
+export { controlSecret } from '../auth/identity.js';
 export { installAutostart, removeAutostart, autostartPath } from './service.js';
 export { main as runAgent };
 export { discoverLocalServices, classifyAddress } from '../service_proxy/local.js';

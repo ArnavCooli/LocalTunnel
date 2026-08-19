@@ -3,6 +3,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { platform } from 'node:os';
+import { CONTROL_HEADER, agentDataDir, controlSecret } from '@localtunnel/agent';
 import type { TunnelStatus } from '@localtunnel/agent';
 
 /**
@@ -167,9 +168,14 @@ export class AgentSupervisor extends EventEmitter {
           path,
           method,
           timeout: 30_000,
-          headers: payload
-            ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
-            : {},
+          // The agent refuses anything that cannot present the secret from its
+          // own 0700 data directory, so another local process cannot drive it.
+          headers: {
+            [CONTROL_HEADER]: controlSecret(agentDataDir()),
+            ...(payload
+              ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+              : {}),
+          },
         },
         (res) => {
           const chunks: Buffer[] = [];

@@ -3,9 +3,11 @@ import { spawn } from 'node:child_process';
 import { existsSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  CONTROL_HEADER,
   agentDataDir,
   anotherAgentIsRunning,
   autostartPath,
+  controlSecret,
   ipcPath,
   installAutostart,
   removeAutostart,
@@ -38,9 +40,14 @@ function ipc<T>(method: string, path: string, body?: unknown): Promise<T> {
         path,
         method,
         timeout: 30_000,
-        headers: payload
-          ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
-          : undefined,
+        // Being a local process is not authorisation; the agent wants the secret
+        // from its own data directory, which only this user can read.
+        headers: {
+          [CONTROL_HEADER]: controlSecret(agentDataDir()),
+          ...(payload
+            ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+            : {}),
+        },
       },
       (res) => {
         const chunks: Buffer[] = [];

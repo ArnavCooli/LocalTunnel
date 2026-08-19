@@ -11,6 +11,7 @@ import {
 } from './api.js';
 import { Toast } from './components.js';
 import { AppSidebar, type Tab } from './components/app-sidebar.js';
+import { UpdateBanner } from './components/updates.js';
 import { Welcome } from './screens/Welcome.js';
 import { SignInWithToken } from './screens/SignInWithToken.js';
 import { OracleWizard, ProviderPicker, ProviderSetup } from './screens/OracleWizard.js';
@@ -246,6 +247,7 @@ export function App() {
       />
 
       <main className="main">
+        <UpdateBanner onOpenSettings={() => setTab('settings')} />
         {tab === 'home' && (
           <Home
             gatewayStatus={gatewayStatus}

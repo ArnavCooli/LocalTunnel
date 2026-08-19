@@ -41,6 +41,12 @@ export async function adminFetch<T = unknown>(
   path: string,
   body?: unknown,
 ): Promise<T> {
+  // Checked before anything is dialled: the path is written into a raw request
+  // line, so a CR or LF in it would be a second request smuggled in behind the
+  // Authorization header this connection carries.
+  if (!isSafeRequestTarget(path)) {
+    throw new GatewayError('That request path is not valid.', 0);
+  }
   const response = await rawRequest(connection, method, path, body);
   if (response.status === 401) {
     throw new GatewayError(
@@ -56,6 +62,19 @@ export async function adminFetch<T = unknown>(
     throw new GatewayError(detail, response.status);
   }
   return response.body as T;
+}
+
+/**
+ * Is this a request target we are willing to write into a raw request line?
+ *
+ * The admin request is assembled by hand, so anything outside the printable
+ * ASCII a URL may contain — a CR or LF above all — would not be a path but a
+ * second request, smuggled in behind the Authorization header this connection
+ * already carries. Ids and hostnames reaching here come from a gateway's own
+ * responses and from the renderer, neither of which is a place to be trusting.
+ */
+export function isSafeRequestTarget(path: string): boolean {
+  return path.startsWith('/') && path.length <= 2048 && /^[A-Za-z0-9\-._~!$&'()*+,;=:@/?%[\]]+$/.test(path);
 }
 
 function rawRequest(
@@ -241,20 +260,24 @@ export const gatewayApi = {
       '/v1/machines/enroll-token',
     ),
   revokeMachine: (c: GatewayConnection, id: string) =>
-    adminFetch(c, 'POST', `/v1/machines/${id}/revoke`),
-  removeMachine: (c: GatewayConnection, id: string) => adminFetch(c, 'DELETE', `/v1/machines/${id}`),
+    adminFetch(c, 'POST', `/v1/machines/${encodeURIComponent(id)}/revoke`),
+  removeMachine: (c: GatewayConnection, id: string) => adminFetch(c, 'DELETE', `/v1/machines/${encodeURIComponent(id)}`),
   renameMachine: (c: GatewayConnection, id: string, name: string) =>
-    adminFetch(c, 'PATCH', `/v1/machines/${id}`, { name }),
+    adminFetch(c, 'PATCH', `/v1/machines/${encodeURIComponent(id)}`, { name }),
   services: (c: GatewayConnection) => adminFetch<{ services: ServiceView[] }>(c, 'GET', '/v1/services'),
   createService: (c: GatewayConnection, service: Record<string, unknown>) =>
     adminFetch<{ service: ServiceView }>(c, 'POST', '/v1/services', service),
   updateService: (c: GatewayConnection, id: string, patch: Record<string, unknown>) =>
-    adminFetch<{ service: ServiceView }>(c, 'PATCH', `/v1/services/${id}`, patch),
-  removeService: (c: GatewayConnection, id: string) => adminFetch(c, 'DELETE', `/v1/services/${id}`),
+    adminFetch<{ service: ServiceView }>(c, 'PATCH', `/v1/services/${encodeURIComponent(id)}`, patch),
+  removeService: (c: GatewayConnection, id: string) => adminFetch(c, 'DELETE', `/v1/services/${encodeURIComponent(id)}`),
   certificates: (c: GatewayConnection) =>
     adminFetch<{ certificates: CertificateView[] }>(c, 'GET', '/v1/certificates'),
   reissueCertificate: (c: GatewayConnection, hostname: string) =>
-    adminFetch<{ certificate: CertificateView }>(c, 'POST', `/v1/certificates/${hostname}/issue`),
+    adminFetch<{ certificate: CertificateView }>(
+      c,
+      'POST',
+      `/v1/certificates/${encodeURIComponent(hostname)}/issue`,
+    ),
   diagnostics: (c: GatewayConnection, serviceId?: string) =>
     adminFetch<GatewayDiagnostics>(
       c,

@@ -100,6 +100,12 @@ const api = {
   logs: {
     gateway: (gatewayId?: string) => ipcRenderer.invoke('logs:gateway', gatewayId),
   },
+  updates: {
+    /** The last known answer, without touching the network. */
+    state: () => ipcRenderer.invoke('updates:state'),
+    /** Check now. `force` skips the cache — what the "Check now" button sends. */
+    check: (force?: boolean) => ipcRenderer.invoke('updates:check', force),
+  },
 };
 
 contextBridge.exposeInMainWorld('localtunnel', api);

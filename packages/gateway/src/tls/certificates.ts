@@ -83,6 +83,18 @@ export class CertificateManager {
     return this.entries.has(hostname.toLowerCase());
   }
 
+  /**
+   * Is this a hostname this gateway is responsible for at all?
+   *
+   * Used by the plain-HTTP listener to decide whether a redirect is ours to
+   * issue: `pending` counts, because a name whose certificate is still being
+   * issued is still one of ours.
+   */
+  serves(hostname: string): boolean {
+    const key = hostname.toLowerCase();
+    return this.entries.has(key) || this.states.has(key);
+  }
+
   status(hostname: string): CertificateStatus {
     const key = hostname.toLowerCase();
     const entry = this.entries.get(key);

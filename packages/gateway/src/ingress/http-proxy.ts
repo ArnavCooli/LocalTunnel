@@ -17,6 +17,16 @@ const UPSTREAM_TIMEOUT_MS = 60_000;
 /** Only worth compressing text; images and archives are already compressed. */
 const COMPRESSIBLE = /^(text\/|application\/(json|javascript|xml|xhtml|rss|atom|manifest|wasm)|image\/svg)/i;
 
+/**
+ * What a visitor is told when something behind the tunnel is broken.
+ *
+ * Everything more specific — which machine is offline, which local host and port
+ * refused the connection, what the agent said — describes the inside of someone's
+ * home network, and the person reading a public error page is not its owner. The
+ * detail goes to the gateway log and to the owner's Diagnostics screen instead.
+ */
+const PUBLIC_FAILURE = 'This service is temporarily unavailable. Please try again shortly.';
+
 const HOP_BY_HOP = new Set([
   'connection',
   'keep-alive',
@@ -46,8 +56,12 @@ export class HttpProxy {
 
   constructor(private readonly options: HttpProxyOptions) {
     this.server = http.createServer({ keepAliveTimeout: 30_000 });
-    this.server.on('request', (req, res) => void this.onRequest(req, res));
-    this.server.on('upgrade', (req, socket, head) => void this.onUpgrade(req, socket, head));
+    this.server.on('request', (req, res) => this.guard(this.onRequest(req, res), res));
+    this.server.on('upgrade', (req, socket, head) =>
+      this.onUpgrade(req, socket, head).catch(() => {
+        if (!socket.destroyed) socket.destroy();
+      }),
+    );
     this.server.on('clientError', (_err, socket) => {
       if (!socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     });
@@ -59,11 +73,33 @@ export class HttpProxy {
      * request path serves both.
      */
     this.h2Server = http2.createServer({ settings: { enablePush: false } });
-    this.h2Server.on('request', (req, res) => void this.onRequest(req, res));
+    this.h2Server.on('request', (req, res) => this.guard(this.onRequest(req, res), res));
     this.h2Server.on('sessionError', () => {
       /* a broken client should not take the gateway down */
     });
     this.h2Server.on('clientError', (_err, socket) => socket.destroy());
+  }
+
+  /**
+   * Nothing a visitor sends may take the gateway down.
+   *
+   * These handlers are async, so a throw becomes a rejected promise — and an
+   * unhandled rejection ends the Node process. Header values that Node's server
+   * accepts but its client rejects are one way to provoke exactly that, so the
+   * failure is contained here and answered with a 502 instead.
+   */
+  private guard(work: Promise<void>, res: AnyResponse): void {
+    work.catch((err) => {
+      this.options.log.error('request handler failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      try {
+        if (!res.headersSent) respondPage(res, 502, 'Service unavailable', PUBLIC_FAILURE);
+        else res.destroy();
+      } catch {
+        res.destroy();
+      }
+    });
   }
 
   /** Hand over a socket that has already completed TLS (or plain :80 traffic). */
@@ -101,12 +137,13 @@ export class HttpProxy {
       stream = registry.openStream(service.machineId, service.id, remoteAddr(req.socket));
     } catch (err) {
       store.recordServiceError(service.id);
-      const message =
-        err instanceof TunnelUnavailableError
-          ? err.message
-          : 'This service is temporarily unavailable.';
-      log.warn('no tunnel for request', { serviceId: service.id, error: String(err) });
-      respondPage(res, 502, 'Service unavailable', message);
+      log.warn('no tunnel for request', {
+        serviceId: service.id,
+        machineId: service.machineId,
+        code: err instanceof TunnelUnavailableError ? err.code : 'unknown',
+        error: String(err),
+      });
+      respondPage(res, 502, 'Service unavailable', PUBLIC_FAILURE);
       return;
     }
 
@@ -183,9 +220,15 @@ export class HttpProxy {
 
     upstream.on('error', (err) => {
       store.recordServiceError(service.id);
-      log.warn('upstream error', { serviceId: service.id, error: refusal ?? err.message });
+      // The agent's own words are the useful diagnostic, and they name the user's
+      // local host and port — so they go in the log, never in the public page.
+      log.warn('upstream error', {
+        serviceId: service.id,
+        target: `${service.localHost}:${service.localPort}`,
+        error: refusal ?? err.message,
+      });
       if (!res.headersSent) {
-        respondPage(res, 502, 'Service unavailable', refusal ?? localFailureMessage(service, err));
+        respondPage(res, 502, 'Service unavailable', PUBLIC_FAILURE);
       } else {
         res.destroy();
       }
@@ -193,14 +236,18 @@ export class HttpProxy {
     });
 
     upstream.on('timeout', () => {
-      log.warn('upstream timed out', { serviceId: service.id });
+      log.warn('upstream timed out', {
+        serviceId: service.id,
+        target: `${service.localHost}:${service.localPort}`,
+        afterSeconds: UPSTREAM_TIMEOUT_MS / 1000,
+      });
       store.recordServiceError(service.id);
       if (!res.headersSent) {
         respondPage(
           res,
           504,
           'Service timed out',
-          `${service.localHost}:${service.localPort} accepted the connection but did not respond within ${UPSTREAM_TIMEOUT_MS / 1000} seconds.`,
+          'The service did not respond in time. Please try again shortly.',
         );
       }
       upstream.destroy();
@@ -300,13 +347,6 @@ function remoteAddr(socket: { remoteAddress?: string | null; remotePort?: number
 }
 
 
-function localFailureMessage(service: ServiceRecord, err: Error): string {
-  const target = `${service.localHost}:${service.localPort}`;
-  if (/ECONNREFUSED|dial_failed|connect/i.test(err.message)) {
-    return `The tunnel is up, but nothing is listening on ${target} on your computer. Start the service and try again.`;
-  }
-  return 'This service is temporarily unavailable.';
-}
 
 /** A plain, self-explanatory error page — never a bare proxy error. */
 function respondPage(res: AnyResponse, status: number, title: string, detail: string): void {

@@ -22,6 +22,19 @@ export const MAX_FRAME_PAYLOAD = 1024 * 1024;
 export const MAX_DATA_CHUNK = 64 * 1024;
 /** Per-stream receive window, in bytes, in each direction. */
 export const DEFAULT_WINDOW = 256 * 1024;
+/**
+ * How far past the advertised window a peer may run before we treat it as hostile.
+ * A frame in flight when we grant credit is normal; a whole extra window of
+ * unrequested data is not, and buffering it is how a peer would exhaust our memory.
+ */
+export const WINDOW_OVERRUN_SLACK = MAX_FRAME_PAYLOAD;
+/**
+ * Streams one connection may have open at once. The gateway applies its own,
+ * lower, per-machine limit; this is the backstop each side enforces on its peer.
+ */
+export const MAX_CONCURRENT_STREAMS = 2048;
+/** Stream ids are carried in 4 bytes, so they run out rather than wrapping. */
+export const MAX_STREAM_ID = 0xffffffff;
 
 export enum FrameType {
   CONTROL = 0x01,

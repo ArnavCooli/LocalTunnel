@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, type AppState } from '../api.js';
 import { Alert, Copyable, ExternalLink, Modal } from '../components.js';
+import { UpdateSection } from '../components/updates.js';
 
 export function Settings({
   state,
@@ -101,6 +102,8 @@ export function Settings({
           <Copyable value={gatewayLogHint} />
         </>
       )}
+
+      <UpdateSection />
 
       <h2>Uninstall</h2>
       <Alert tone="info" title="Two separate things">

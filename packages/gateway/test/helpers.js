@@ -8,6 +8,7 @@ const { join } = require('node:path');
 
 const { ALPN } = require('../../protocol/dist/index.js');
 const { startGateway, defaultConfig } = require('../dist/main/index.js');
+const { DEFAULT_LIMITS } = require('../dist/main/config.js');
 
 /** A throwaway directory that cleans itself up. */
 function tempDir(prefix = 'lt-test-') {
@@ -46,6 +47,19 @@ async function bootGateway(overrides = {}) {
     tls: { mode: 'selfsigned', acmeDirectoryUrl: '', contactEmail: null, renewBeforeDays: 30 },
     firewall: { manage: false },
     ...overrides,
+    /*
+     * Every connection in this suite comes from 127.0.0.1, so the whole suite
+     * shares one per-IP budget — including the harness's own polling, which
+     * opens a fresh TLS connection per tick. On a loaded machine the
+     * self-signed RSA keygen takes long enough that waiting for a certificate
+     * alone can burn the production allowance, and the *next* test connection
+     * is then dropped: an ECONNRESET with nothing to do with what was being
+     * tested. The limiter has its own test in limits.test.js; here it is
+     * raised out of the way so it cannot mask a real failure.
+     *
+     * A test that wants the real thing passes `limits` explicitly.
+     */
+    limits: { ...DEFAULT_LIMITS, connectionsPerIpPerMinute: 100_000, ...(overrides.limits ?? {}) },
   });
 
   const gateway = await startGateway(config);
@@ -153,7 +167,14 @@ async function startLocalSite(handler) {
   return { port, server, stop: () => new Promise((resolve) => server.close(resolve)) };
 }
 
-function waitFor(predicate, { timeoutMs = 15000, intervalMs = 100, label = 'condition' } = {}) {
+/**
+ * Poll until something becomes true.
+ *
+ * `intervalMs` is deliberately not tiny: several predicates here open a network
+ * connection per tick, and polling far faster than the event can possibly occur
+ * only adds load to the machine that is already the reason it is slow.
+ */
+function waitFor(predicate, { timeoutMs = 15000, intervalMs = 250, label = 'condition' } = {}) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     const tick = async () => {

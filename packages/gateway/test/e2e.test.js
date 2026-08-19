@@ -143,16 +143,26 @@ test('an unknown hostname gets a 404 that does not disclose other services', asy
   assert.ok(!res.body.includes(HOSTNAME), 'no other hostname is leaked');
 });
 
-test('a stopped local service produces a readable 502, not a bare proxy error', async (t) => {
+test('a stopped local service produces a 502 that keeps the home network private', async (t) => {
   const env = await scaffold();
   t.after(() => env.teardown());
-  await env.publish();
+  const service = await env.publish();
   await env.site.stop();
 
   const res = await publicRequest(env.ctx, HOSTNAME, '/');
   assert.equal(res.status, 502);
-  assert.match(res.body, /nothing is listening/i);
-  assert.match(res.body, new RegExp(String(env.site.port)));
+  assert.match(res.body, /temporarily unavailable/i);
+  // A visitor is a stranger to this network: the page must not describe it.
+  assert.doesNotMatch(res.body, new RegExp(String(env.site.port)), 'leaked the local port');
+  assert.doesNotMatch(res.body, /127\.0\.0\.1|localhost/i, 'leaked the local address');
+  assert.doesNotMatch(res.body, /nothing is listening/i, 'leaked the local failure reason');
+
+  // Withholding detail from strangers is not the same as hiding it from the
+  // owner: the failure is still visible over the authenticated admin API.
+  const services = await adminRequest(env.ctx, 'GET', '/v1/services');
+  const owned = services.body.services.find((s) => s.id === service.id);
+  assert.ok(owned, 'the service is still listed for its owner');
+  assert.ok(owned.stats.errors > 0, 'the failure is recorded against the service');
 });
 
 test('the tunnel reconnects by itself after the connection drops', async (t) => {

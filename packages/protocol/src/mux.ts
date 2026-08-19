@@ -4,8 +4,11 @@ import {
   DEFAULT_WINDOW,
   FrameParser,
   FrameType,
+  MAX_CONCURRENT_STREAMS,
   MAX_DATA_CHUNK,
+  MAX_STREAM_ID,
   ProtocolError,
+  WINDOW_OVERRUN_SLACK,
   decodeJson,
   encodeFrame,
   encodeJsonFrame,
@@ -28,6 +31,12 @@ export class TunnelStream extends Duplex {
   private sendWindow = DEFAULT_WINDOW;
   private ungrantedBytes = 0;
   private inbound: Buffer[] = [];
+  /**
+   * Bytes received for which no credit has been handed back yet. Flow control is
+   * only a bound on memory if the *receiver* enforces it, so this is checked
+   * against the window rather than trusted to the sender.
+   */
+  private receiveOutstanding = 0;
   private flowing = false;
   private remoteEnded = false;
   private localEnded = false;
@@ -74,7 +83,8 @@ export class TunnelStream extends Duplex {
 
   /** Called by the mux when a WINDOW frame arrives for this stream. */
   grantCredits(credits: number): void {
-    this.sendWindow += credits;
+    // A peer handing out absurd credit does not get to switch our own bounds off.
+    this.sendWindow = Math.min(this.sendWindow + credits, DEFAULT_WINDOW * 4);
     const parked = this.parked;
     if (parked && this.sendWindow > 0) {
       this.parked = null;
@@ -99,6 +109,15 @@ export class TunnelStream extends Duplex {
   /** Called by the mux when a DATA frame arrives for this stream. */
   acceptData(payload: Buffer): void {
     if (this.shutDown) return;
+    this.receiveOutstanding += payload.length;
+    if (this.receiveOutstanding > DEFAULT_WINDOW + WINDOW_OVERRUN_SLACK) {
+      // The peer is ignoring the window it was granted. Queueing the data anyway
+      // is an unbounded allocation driven by the other end, so refuse the frame
+      // and let the mux tear the connection down.
+      throw new ProtocolError(
+        `stream ${this.id} exceeded its receive window by ${this.receiveOutstanding - DEFAULT_WINDOW} bytes`,
+      );
+    }
     this.bytesIn += payload.length;
     this.inbound.push(payload);
     this.drainInbound();
@@ -118,6 +137,7 @@ export class TunnelStream extends Duplex {
     if (this.ungrantedBytes >= DEFAULT_WINDOW / 2) {
       const credits = this.ungrantedBytes;
       this.ungrantedBytes = 0;
+      this.receiveOutstanding = Math.max(0, this.receiveOutstanding - credits);
       if (!this.shutDown) this.mux.sendFrame(FrameType.WINDOW, this.id, credits);
     }
     if (this.remoteEnded && this.inbound.length === 0) {
@@ -289,10 +309,18 @@ export class Mux extends EventEmitter {
       throw new Error('only the gateway side may open streams');
     }
     if (this.ended) throw new Error('tunnel is closed');
+    if (this.streams.size >= MAX_CONCURRENT_STREAMS) {
+      throw new Error('too many concurrent streams on this tunnel');
+    }
     const id = this.nextStreamId;
+    if (id > MAX_STREAM_ID) {
+      // Ids are never reused, so a connection that has burned through the whole
+      // space has to be replaced rather than wrapped round onto live streams.
+      throw new Error('this tunnel has exhausted its stream ids; reconnect');
+    }
     this.nextStreamId += 2;
     const stream = new TunnelStream(this, id, open);
-    this.streams.set(id, stream);
+    this.register(stream);
     this.sendFrame(FrameType.OPEN, id, Buffer.from(JSON.stringify(open), 'utf8'));
     return stream;
   }
@@ -304,6 +332,20 @@ export class Mux extends EventEmitter {
 
   forgetStream(id: number): void {
     this.streams.delete(id);
+  }
+
+  /**
+   * Track a stream the mux owns.
+   *
+   * The no-op error listener is load-bearing. Tearing a connection down aborts
+   * every stream on it with an error, and a Duplex that emits 'error' with no
+   * listener throws an uncaughtException — so a single malformed frame from the
+   * peer could take the whole process down before a consumer had attached its
+   * own handler. Consumers that do listen still receive the error normally.
+   */
+  private register(stream: TunnelStream): void {
+    stream.on('error', () => {});
+    this.streams.set(stream.id, stream);
   }
 
   /* ---------------------------------------------------------------- input */
@@ -337,9 +379,19 @@ export class Mux extends EventEmitter {
     if (type === FrameType.OPEN) {
       if (this.role !== 'agent') throw new ProtocolError('gateway received an OPEN frame');
       if (this.streams.has(streamId)) throw new ProtocolError(`stream ${streamId} already exists`);
+      // Only the gateway opens streams, and it opens odd ids. An OPEN carrying an
+      // id from our own half of the space is a peer trying to confuse the mapping.
+      if (streamId % 2 === 0) {
+        throw new ProtocolError(`stream ${streamId} is not in the opener's id space`);
+      }
+      if (this.streams.size >= MAX_CONCURRENT_STREAMS) {
+        // Refuse the stream without killing the healthy ones already running.
+        this.sendClose(streamId, { reason: 'too many concurrent streams', code: 'limit' });
+        return;
+      }
       const open = decodeJson<OpenRequest>(payload);
       const stream = new TunnelStream(this, streamId, open);
-      this.streams.set(streamId, stream);
+      this.register(stream);
       this.opensAccepted += 1;
       this.emit('stream', stream);
       return;

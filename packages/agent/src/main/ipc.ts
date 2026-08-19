@@ -1,18 +1,30 @@
 import http from 'node:http';
-import { existsSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { platform } from 'node:os';
 import { join } from 'node:path';
 import { discoverLocalServices } from '../service_proxy/local.js';
 import { enroll } from '../auth/enroll.js';
-import { Identity } from '../auth/identity.js';
+import { Identity, secretsMatch } from '../auth/identity.js';
 import type { TunnelClient } from '../tunnel/client.js';
+
+/** Header a local client presents to prove it may drive this agent. */
+export const CONTROL_HEADER = 'x-localtunnel-control';
+
+/** The largest control request body the agent will read. */
+const MAX_IPC_BODY_BYTES = 64 * 1024;
 
 /**
  * The desktop app's channel to the background agent.
  *
  * A unix socket (named pipe on Windows) rather than a TCP port: nothing on the
- * network, not even localhost, can reach it, and file permissions decide who may
- * talk to the agent.
+ * network, not even localhost, can reach it.
+ *
+ * Being local is not by itself authorisation. This endpoint can enrol the
+ * computer with a gateway, start and stop tunnels and erase its identity, so
+ * every route except the liveness probe requires the control secret from the
+ * agent's own 0700 data directory. That is a boundary another user's process
+ * cannot cross, and on Windows — where a named pipe's ACL is not ours to set
+ * from Node — it is the only boundary there is.
  */
 export function ipcPath(dataDir = new Identity().dataDir): string {
   if (platform() === 'win32') return '\\\\.\\pipe\\localtunnel-agent';
@@ -29,7 +41,10 @@ export function ipcPath(dataDir = new Identity().dataDir): string {
 export function anotherAgentIsRunning(socketPath = ipcPath()): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.request(
-      { socketPath, path: '/status', method: 'GET', timeout: 2000 },
+      // `/alive` answers without the control secret on purpose: it reveals only
+      // that an agent holds this socket, which is what a second instance needs
+      // to know before standing aside.
+      { socketPath, path: '/alive', method: 'GET', timeout: 2000 },
       (res) => {
         res.resume();
         resolve((res.statusCode ?? 500) < 500);
@@ -82,6 +97,8 @@ export function startIpcServer(options: IpcOptions): http.Server {
   const { client, identity } = options;
   const socketPath = options.path ?? ipcPath(identity.dataDir);
 
+  const secret = identity.controlSecret();
+
   const server = http.createServer((req, res) => {
     void handle(req, res).catch((err) => {
       if (!res.headersSent) {
@@ -93,6 +110,21 @@ export function startIpcServer(options: IpcOptions): http.Server {
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const path = (req.url ?? '/').split('?')[0].replace(/\/+$/, '') || '/';
     const method = req.method ?? 'GET';
+
+    // Liveness only. It carries no information about the machine, its gateway or
+    // its services, so it is the one route that answers unauthenticated.
+    if (method === 'GET' && path === '/alive') {
+      return json(res, 200, { ok: true });
+    }
+
+    const presented = req.headers[CONTROL_HEADER];
+    if (typeof presented !== 'string' || !secretsMatch(presented, secret)) {
+      return json(res, 401, {
+        error:
+          'This request did not present the local control secret. Only LocalTunnel ' +
+          'on this user account may drive the agent.',
+      });
+    }
 
     if (method === 'GET' && path === '/status') {
       return json(res, 200, client.status());
@@ -156,7 +188,19 @@ export function startIpcServer(options: IpcOptions): http.Server {
     json(res, 404, { error: 'no such endpoint' });
   }
 
-  server.listen(socketPath);
+  server.listen(socketPath, () => {
+    // Belt as well as braces: the data directory is already 0700, but the socket
+    // itself is created with the process umask, and LOCALTUNNEL_AGENT_SOCKET can
+    // put it somewhere far less private. Windows named pipes have no mode bits —
+    // the control secret is what protects them.
+    if (platform() !== 'win32') {
+      try {
+        chmodSync(socketPath, 0o600);
+      } catch {
+        /* a socket we cannot chmod is still guarded by the control secret */
+      }
+    }
+  });
   return server;
 }
 
@@ -168,7 +212,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 
 async function readJson<T>(req: http.IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_IPC_BODY_BYTES) throw new Error('request body too large');
+    chunks.push(chunk as Buffer);
+  }
   if (chunks.length === 0) return {} as T;
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
 }

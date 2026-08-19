@@ -157,11 +157,15 @@ else
     GOT="$(sha256sum "$TMP/$TARBALL" | cut -d' ' -f1)"
   elif command -v shasum >/dev/null 2>&1; then
     GOT="$(shasum -a 256 "$TMP/$TARBALL" | cut -d' ' -f1)"
+  elif command -v openssl >/dev/null 2>&1; then
+    GOT="$(openssl dgst -sha256 "$TMP/$TARBALL" | awk '{print $NF}')"
   else
-    GOT=""
-    note "no sha256sum on this machine, skipping the checksum check"
+    # This tarball becomes the runtime every later step executes. "We could not
+    # check it, so we ran it anyway" is not a decision to make on the user's
+    # behalf — installing a known-good Node.js by hand is the safe way out.
+    fail "no sha256sum, shasum or openssl on this machine, so the Node.js download cannot be verified. Install Node.js $NODE_MAJOR_MIN+ yourself and run this again."
   fi
-  if [ -n "$GOT" ] && [ "$GOT" != "$WANT_SUM" ]; then
+  if [ "$GOT" != "$WANT_SUM" ]; then
     fail "$TARBALL failed its checksum — the download is corrupt or was tampered with. Nothing was installed."
   fi
 

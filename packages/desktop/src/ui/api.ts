@@ -34,6 +34,19 @@ export interface GatewaySummary {
   active: boolean;
 }
 
+export interface UpdateStatus {
+  current: string;
+  latest: string | null;
+  updateAvailable: boolean;
+  /** Always LocalTunnel's own release page — never a URL from the response. */
+  url: string;
+  /** Plain text. Rendered as text, never as markup. */
+  notes: string | null;
+  publishedAt: string | null;
+  checkedAt: string | null;
+  error: string | null;
+}
+
 export interface AppState {
   onboarded: boolean;
   activeGatewayId: string | null;

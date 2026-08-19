@@ -5,12 +5,17 @@ import { AppStore } from '../services/store.js';
 import { AgentSupervisor, defaultSocketPath } from '../services/agent-supervisor.js';
 import { gatewayApi, type GatewayConnection } from '../services/gateway-client.js';
 import { GatewayInstaller, INSTALL_STEPS, uninstallGateway, type InstallEvent } from '../setup/installer.js';
+import { KnownHosts } from '../setup/known-hosts.js';
+import { UpdateChecker } from '../services/updates.js';
 import { detectSshCredentials, secureKeyFile } from '../setup/ssh-keys.js';
 import { runDiagnostics } from '../diagnostics/engine.js';
 
 let window: BrowserWindow | null = null;
 let store: AppStore;
 let supervisor: AgentSupervisor;
+/** SSH host keys this app has pinned; see setup/known-hosts.ts. */
+let knownHosts: KnownHosts;
+let updates: UpdateChecker;
 
 /**
  * Paths to things shipped with the app: the agent it supervises, and the gateway
@@ -80,13 +85,54 @@ function createWindow(): void {
 
   // Links to Oracle Cloud and so on belong in the user's real browser.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//.test(url)) void shell.openExternal(url);
+    if (isExternalLink(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  /*
+   * The window never navigates anywhere.
+   *
+   * Its preload bridge can install a gateway over SSH, read the admin token and
+   * wipe this computer's identity. That is safe to expose to the app's own
+   * bundled UI and to nothing else — but a preload is attached to the window,
+   * not to a document, so it would be handed to whatever the window navigated
+   * to next. A stray target-less link or an injected redirect is enough. So:
+   * the app's own page loads, and any navigation away from it is refused and
+   * sent to the real browser instead.
+   */
+  const appOrigin = process.env.VITE_DEV_SERVER_URL ?? null;
+  window.webContents.on('will-navigate', (event, url) => {
+    const staysInApp = appOrigin
+      ? url.startsWith(appOrigin)
+      : url.startsWith('file://');
+    if (staysInApp) return;
+    event.preventDefault();
+    if (isExternalLink(url)) void shell.openExternal(url);
+  });
+
+  // The UI has no <webview>, and one appearing would be a route around all of
+  // the above rather than a feature.
+  window.webContents.on('will-attach-webview', (event) => event.preventDefault());
 
   window.on('closed', () => {
     window = null;
   });
+}
+
+/**
+ * Is this a link that belongs in the user's real browser?
+ *
+ * Restricted to http(s) on purpose: `shell.openExternal` hands the string to the
+ * OS, where schemes like `file:` and platform-specific handlers can start
+ * programs rather than open a page.
+ */
+function isExternalLink(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
 }
 
 /** The connection details for a stored gateway, with its token decrypted. */
@@ -202,7 +248,7 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('app:openExternal', (_e, url: string) => {
-    if (!/^https?:\/\//.test(url)) throw new Error('refusing to open a non-http link');
+    if (!isExternalLink(url)) throw new Error('refusing to open a non-http link');
     return shell.openExternal(url);
   });
 
@@ -287,6 +333,20 @@ function registerIpc(): void {
   ipcMain.handle(
     'gateway:addExisting',
     (_e, profile: { name: string; host: string; port: number; adminToken: string; fingerprint: string; provider: string }) => {
+      // The fingerprint is the only thing standing between this app and a
+      // hostile server on that address, so a malformed one is refused here
+      // rather than stored and silently failing every connection later.
+      const fingerprint = String(profile.fingerprint ?? '')
+        .replace(/[^a-f0-9]/gi, '')
+        .toUpperCase();
+      if (fingerprint.length !== 64) {
+        throw new Error(
+          'That is not a SHA-256 certificate fingerprint. It is 64 hexadecimal characters.',
+        );
+      }
+      if (!String(profile.adminToken ?? '').trim()) {
+        throw new Error('An admin token is required to manage a gateway.');
+      }
       return store.addGateway({
         id: `gw_${Date.now().toString(36)}`,
         name: profile.name,
@@ -294,7 +354,7 @@ function registerIpc(): void {
         port: profile.port || 443,
         provider: profile.provider || 'generic',
         region: null,
-        fingerprint: profile.fingerprint,
+        fingerprint,
         adminToken: profile.adminToken,
       });
     },
@@ -302,7 +362,7 @@ function registerIpc(): void {
 
   ipcMain.handle('gateway:install', async (event, target: Record<string, string>) => {
     const paths = resources();
-    const installer = new GatewayInstaller();
+    const installer = new GatewayInstaller(knownHosts);
     installer.on('event', (payload: InstallEvent) => {
       event.sender.send('gateway:install-progress', payload);
     });
@@ -376,7 +436,7 @@ function registerIpc(): void {
 
   /** What is on that server already, so the app can offer the right next step. */
   ipcMain.handle('gateway:probe', async (_e, target: Record<string, string>) => {
-    const installer = new GatewayInstaller();
+    const installer = new GatewayInstaller(knownHosts);
     return installer.probe({
       host: String(target.host),
       port: Number(target.port) || 22,
@@ -389,7 +449,7 @@ function registerIpc(): void {
 
   /** Take over a gateway that is already installed, and store its new token. */
   ipcMain.handle('gateway:adopt', async (event, target: Record<string, string>) => {
-    const installer = new GatewayInstaller();
+    const installer = new GatewayInstaller(knownHosts);
     installer.on('event', (payload: InstallEvent) => {
       event.sender.send('gateway:install-progress', payload);
     });
@@ -434,6 +494,7 @@ function registerIpc(): void {
         passphrase: target.passphrase || undefined,
       },
       (line) => event.sender.send('gateway:uninstall-progress', { type: 'output', line }),
+      knownHosts,
     );
     if (result.ok && target.gatewayId) store.removeGateway(String(target.gatewayId));
     return result;
@@ -599,6 +660,17 @@ function registerIpc(): void {
     }
   });
 
+  /* -------------------------------------------------------------- updates */
+
+  /**
+   * Update checking is a read of a public release list and nothing more: it
+   * reports what the newest version is, and the user installs it themselves.
+   * `force` is what the "Check now" button sends; without it the answer is
+   * served from cache so opening Settings does not hit the network each time.
+   */
+  ipcMain.handle('updates:check', (_e, force?: boolean) => updates.check(Boolean(force)));
+  ipcMain.handle('updates:state', () => updates.state());
+
   /* ----------------------------------------------------------------- logs */
 
   ipcMain.handle('logs:gateway', async (_e, gatewayId?: string) => {
@@ -615,6 +687,8 @@ function registerIpc(): void {
 
 app.whenReady().then(async () => {
   store = new AppStore();
+  knownHosts = new KnownHosts(app.getPath('userData'));
+  updates = new UpdateChecker(app.getVersion());
   supervisor = new AgentSupervisor({
     execPath: process.execPath,
     scriptPath: resources().agentScript,
@@ -631,6 +705,10 @@ app.whenReady().then(async () => {
   if (store.gateways.length > 0) {
     void supervisor.ensureRunning().catch(() => undefined);
   }
+
+  // Look for a newer version once the window is up, so Settings has an answer
+  // ready. A failure here is not worth telling anyone about at startup.
+  setTimeout(() => void updates.check().catch(() => undefined), 5_000).unref();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

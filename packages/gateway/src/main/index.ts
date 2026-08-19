@@ -157,6 +157,19 @@ async function main(): Promise<void> {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  /*
+   * A public-facing daemon must not be killable by one bad request.
+   *
+   * Node ends the process on an unhandled rejection, and every request handler
+   * here is async — so without this, any throw on a request path is a remote
+   * denial of service. Handlers contain their own failures; these two are the
+   * backstop, and they log loudly because a hit means something got past them.
+   */
+  process.on('unhandledRejection', (reason) => {
+    const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+    process.stderr.write(`unhandled rejection: ${detail}\n`);
+  });
   process.on('uncaughtException', (err) => {
     process.stderr.write(`uncaught exception: ${err.stack ?? err.message}\n`);
   });
