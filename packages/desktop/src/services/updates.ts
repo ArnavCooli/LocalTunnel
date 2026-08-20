@@ -58,11 +58,18 @@ export interface UpdateStatus {
  *
  * Strict on purpose: the tag is remote input that gets compared, stored and
  * displayed, so anything that is not a plain dotted version is not a version.
+ *
+ * Releases are tagged with as many components as they need — `1.2` and `1.2.0`
+ * are the same release — so a missing minor or patch reads as zero. Anything
+ * beyond three components, or a component that is not a plain number, is not a
+ * tag this app will act on.
  */
 export function parseVersion(value: string): [number, number, number] | null {
-  const match = /^v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:[-+][0-9A-Za-z.-]{0,32})?$/.exec(value.trim());
+  const match = /^v?(\d{1,6})(?:\.(\d{1,6}))?(?:\.(\d{1,6}))?(?:[-+][0-9A-Za-z.-]{0,32})?$/.exec(
+    value.trim(),
+  );
   if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
 }
 
 /** Is `candidate` a strictly newer release than `current`? */
