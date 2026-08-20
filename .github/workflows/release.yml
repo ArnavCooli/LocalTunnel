@@ -1,0 +1,124 @@
+# Builds the desktop app on every supported platform and publishes a GitHub release.
+#
+# Each platform is built on its own runner because the installer formats are not
+# cross-buildable: .dmg needs macOS (hdiutil), NSIS needs Windows (or wine), and
+# the .deb is assembled from the Linux electron-builder output.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish the release under
+        required: true
+        default: '1.2'
+  push:
+    branches:
+      - claude/app-rebuild-github-release-kntacu
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || '1.2' }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-14
+          - name: Windows
+            os: windows-latest
+          - name: Linux
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build packages
+        run: npm run build
+
+      # The agent's control channel is a unix-domain socket with 0600 permissions,
+      # so its tests cannot run on Windows. Linux and macOS cover them.
+      - name: Test
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: node --test --test-timeout=120000 "packages/protocol/test/*.test.js" "packages/agent/test/*.test.js" "packages/gateway/test/*.test.js"
+
+      - name: Bundle gateway
+        shell: bash
+        run: ./scripts/bundle-gateway.sh
+
+      - name: Build desktop
+        run: npm run build:desktop
+
+      - name: Package macOS
+        if: matrix.os == 'macos-14'
+        run: npx electron-builder --config.electronVersion=$(node -p "require('electron/package.json').version") --mac --arm64 --universal --publish never
+        working-directory: packages/desktop
+
+      - name: Package Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: npx electron-builder --config.electronVersion=$(node -p "require('electron/package.json').version") --win --x64 --arm64 --publish never
+        working-directory: packages/desktop
+
+      - name: Package Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          npx electron-builder --config.electronVersion=$(node -p "require('electron/package.json').version") --linux --x64 --arm64 --publish never
+          node ../../scripts/make-deb.mjs
+        working-directory: packages/desktop
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp packages/desktop/release/*.dmg artifacts/ 2>/dev/null || true
+          cp packages/desktop/release/*.exe artifacts/ 2>/dev/null || true
+          cp packages/desktop/release/*.AppImage artifacts/ 2>/dev/null || true
+          cp packages/desktop/release/*.deb artifacts/ 2>/dev/null || true
+          # The gateway bundle is identical everywhere; publish the Linux copy only.
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then cp build/localtunnel-gateway.tar.gz artifacts/; fi
+          # The combined multi-arch NSIS installer duplicates the per-arch ones.
+          # Matched by exact name: an arch-suffixed installer also ends in a digit.
+          rm -f "artifacts/LocalTunnel-$(node -p "require('./packages/desktop/package.json').version").exe"
+          ls -l artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "${{ github.sha }}" \
+            --title "$RELEASE_TAG" \
+            --notes-file .github/release-notes.md
