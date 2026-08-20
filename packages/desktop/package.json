@@ -1,6 +1,6 @@
 {
   "name": "@localtunnel/desktop",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "description": "LocalTunnel \u2014 expose your home services to the internet through your own VPS.",
   "main": "dist/main/main.js",

@@ -13,11 +13,16 @@ test('versions are parsed only when they really are versions', () => {
   assert.deepEqual(parseVersion('v1.2.3'), [1, 2, 3]);
   assert.deepEqual(parseVersion(' v10.0.4 '), [10, 0, 4]);
   assert.deepEqual(parseVersion('1.2.3-beta.1'), [1, 2, 3]);
+  // Releases are tagged the short way; a missing component is zero.
+  assert.deepEqual(parseVersion('1.2'), [1, 2, 0]);
+  assert.deepEqual(parseVersion('v1.2'), [1, 2, 0]);
+  assert.deepEqual(parseVersion('2'), [2, 0, 0]);
 
   for (const bad of [
     '',
     'latest',
-    '1.2',
+    '1.2.',
+    '.1.2',
     '1.2.3.4',
     'v1.2.3; rm -rf /',
     '<script>alert(1)</script>',
@@ -45,6 +50,9 @@ test('only a strictly higher version counts as an update', () => {
 
 test('version comparison is numeric, not lexicographic', () => {
   assert.equal(isNewer('1.10.0', '1.9.0'), true);
+  // A short tag and its padded form are the same release, not an update.
+  assert.equal(isNewer('1.2', '1.2.0'), false);
+  assert.equal(isNewer('1.2', '1.1.9'), true);
   assert.equal(isNewer('1.9.0', '1.10.0'), false);
 });
 

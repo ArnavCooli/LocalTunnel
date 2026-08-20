@@ -43,6 +43,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The app reports its own version from package.json, and the update check
+      # compares that against the newest release tag. Stamping the tag in here is
+      # what keeps a build from claiming to be a version that was never released.
+      # Runs after `npm ci` so the lockfile still matches what is on disk.
+      - name: Stamp release version
+        shell: bash
+        run: node scripts/set-version.mjs "$RELEASE_TAG"
+
       - name: Build packages
         run: npm run build
 
