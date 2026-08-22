@@ -1,6 +1,6 @@
 import net from 'node:net';
 import { isIP } from 'node:net';
-import type { ServiceDescriptor, ServiceProbe, TunnelStream } from '@localtunnel/protocol';
+import { linkDuplexPair, type ServiceDescriptor, type ServiceProbe, type TunnelStream } from '@localtunnel/protocol';
 
 const DIAL_TIMEOUT_MS = 10_000;
 const PROBE_TIMEOUT_MS = 2_000;
@@ -96,7 +96,8 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
   return new Promise((resolve, reject) => {
     assertAllowed(service);
 
-    const socket = net.connect({ host: service.localHost, port: service.localPort });
+    // noDelay from the first packet: the request head is usually already waiting.
+    const socket = net.connect({ host: service.localHost, port: service.localPort, noDelay: true });
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error(`Timed out connecting to ${service.localHost}:${service.localPort}.`));
@@ -111,18 +112,9 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
         reject(err as Error);
         return;
       }
-      socket.setNoDelay(true);
       socket.pipe(stream);
       stream.pipe(socket);
-
-      const cleanup = () => {
-        if (!socket.destroyed) socket.destroy();
-        if (!stream.destroyed) stream.destroy();
-      };
-      socket.on('error', cleanup);
-      socket.on('close', cleanup);
-      stream.on('error', cleanup);
-      stream.on('close', cleanup);
+      linkDuplexPair(socket, stream);
       resolve();
     });
 

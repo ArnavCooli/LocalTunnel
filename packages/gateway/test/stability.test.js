@@ -93,7 +93,11 @@ test('two tunnels for one machine would flap — the newest wins and the old one
 });
 
 test('a single tunnel stays connected across heartbeat cycles', async (t) => {
-  const ctx = await bootGateway();
+  // Real heartbeats are 15s apart, so watching two of them used to mean a 36s
+  // sleep in the middle of the suite. The interval is configuration, so this
+  // runs the same number of cycles with the clock turned up.
+  const heartbeatMs = 500;
+  const ctx = await bootGateway({ limits: { heartbeatMs } });
   t.after(() => ctx.stop());
   const dir = mkdtempSync(join(tmpdir(), 'lt-steady-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -110,9 +114,9 @@ test('a single tunnel stays connected across heartbeat cycles', async (t) => {
   client.start();
   await waitFor(() => client.status().state === 'connected', { label: 'tunnel to come up' });
 
-  // Two full heartbeat intervals (15s each) plus margin: long enough that a broken
-  // ping/pong would time the connection out and show up as a reconnect.
-  await new Promise((resolve) => setTimeout(resolve, 36_000));
+  // More than the three missed beats that would have the gateway declare the
+  // tunnel dead: a broken ping/pong shows up here as a reconnect.
+  await new Promise((resolve) => setTimeout(resolve, heartbeatMs * 8));
 
   assert.equal(client.status().state, 'connected', `state churned: ${states.join(' → ')}`);
   assert.ok(

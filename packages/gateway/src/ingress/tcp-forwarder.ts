@@ -1,6 +1,7 @@
 import net from 'node:net';
 import dgram from 'node:dgram';
 import type { Logger } from '../main/log.js';
+import { linkDuplexPair } from '@localtunnel/protocol';
 import type { Store } from '../main/state.js';
 import type { TunnelRegistry } from '../tunnels/registry.js';
 import type { ConnectionCounter } from '../auth/limits.js';
@@ -64,7 +65,7 @@ export class TcpForwarder {
   }
 
   private async openTcp(port: number): Promise<void> {
-    const server = net.createServer((socket) => this.onConnection(port, socket));
+    const server = net.createServer({ noDelay: true }, (socket) => this.onConnection(port, socket));
     // A port that cannot be bound — already in use, or privileged — must fail the
     // reconcile rather than leave it awaiting a callback that will never fire.
     const listening = await new Promise<boolean>((resolve) => {
@@ -120,19 +121,12 @@ export class TcpForwarder {
     socket.pipe(stream);
     stream.pipe(socket);
 
-    let released = false;
-    const cleanup = () => {
-      if (released) return;
-      released = true;
+    // Ending rather than destroying: a service that answers and hangs up must
+    // still have its last bytes delivered to the visitor.
+    linkDuplexPair(socket, stream, () => {
       this.connections.release(ip);
       this.store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
-      if (!socket.destroyed) socket.destroy();
-      if (!stream.destroyed) stream.destroy();
-    };
-    socket.on('error', cleanup);
-    socket.on('close', cleanup);
-    stream.on('error', cleanup);
-    stream.on('close', cleanup);
+    });
   }
 
   /**
@@ -169,9 +163,9 @@ export class TcpForwarder {
         sessions.set(key, session);
 
         // Datagrams coming back are framed the same way.
-        let buffer = Buffer.alloc(0);
+        let buffer: Buffer = Buffer.alloc(0);
         stream.on('data', (chunk: Buffer) => {
-          buffer = Buffer.concat([buffer, chunk]);
+          buffer = buffer.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([buffer, chunk]);
           while (buffer.length >= 2) {
             const length = buffer.readUInt16BE(0);
             if (buffer.length < 2 + length) break;
@@ -185,9 +179,11 @@ export class TcpForwarder {
         });
       }
       session.timer.refresh();
-      const header = Buffer.allocUnsafe(2);
-      header.writeUInt16BE(msg.length, 0);
-      session.stream.write(Buffer.concat([header, msg]));
+      // One allocation per datagram instead of two plus a copy.
+      const framed = Buffer.allocUnsafe(2 + msg.length);
+      framed.writeUInt16BE(msg.length, 0);
+      msg.copy(framed, 2);
+      session.stream.write(framed);
     });
 
     const bound = await new Promise<boolean>((resolve) => {

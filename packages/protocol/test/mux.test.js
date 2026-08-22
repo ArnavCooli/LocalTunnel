@@ -189,3 +189,65 @@ test('hostname validation', () => {
   assert.ok(!isValidHostname('-bad.example.com'));
   assert.ok(!isValidHostname('has space.example.com'));
 });
+
+test('a frame split across many reads is reassembled without quadratic copying', () => {
+  const body = Buffer.alloc(1024 * 1024, 9);
+  const frame = encodeFrame(FrameType.DATA, 7, body);
+  const parser = new FrameParser();
+  const frames = [];
+  for (let offset = 0; offset < frame.length; offset += 1500) {
+    frames.push(...parser.push(frame.subarray(offset, Math.min(offset + 1500, frame.length))));
+  }
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].streamId, 7);
+  assert.equal(frames[0].payload.length, body.length);
+  assert.equal(parser.pending, 0);
+
+  // Two frames arriving inside one read are both returned, in order.
+  const pair = Buffer.concat([
+    encodeFrame(FrameType.DATA, 1, Buffer.from('one')),
+    encodeFrame(FrameType.DATA, 3, Buffer.from('two')),
+  ]);
+  const both = new FrameParser().push(pair);
+  assert.equal(both.length, 2);
+  assert.equal(both[0].payload.toString(), 'one');
+  assert.equal(both[1].payload.toString(), 'two');
+});
+
+test('a transfer of several windows survives a stop-start reader', async () => {
+  const [a, b] = socketPair();
+  const gateway = new Mux(a, { role: 'gateway' });
+  const agent = new Mux(b, { role: 'agent' });
+  gateway.on('error', () => {});
+  agent.on('error', () => {});
+
+  // More than one window, and not a whole number of them: credit has to keep
+  // flowing back for the sender to get past the first window, and the tail must
+  // still arrive once the reader has caught up. (The end-to-end suite covers the
+  // same rule through a real HTTP response, where a stalled grant used to hang
+  // the request outright.)
+  const total = DEFAULT_WINDOW * 2 + 7777;
+  const payload = Buffer.alloc(total, 3);
+
+  const received = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the stream stalled under flow control')), 10000);
+    agent.on('stream', (incoming) => {
+      let got = 0;
+      // A reader that pauses is what leaves credit sitting below the threshold.
+      incoming.on('data', (chunk) => {
+        got += chunk.length;
+        incoming.pause();
+        setImmediate(() => incoming.resume());
+      });
+      incoming.on('end', () => {
+        clearTimeout(timer);
+        resolve(got);
+      });
+    });
+  });
+
+  const stream = gateway.openStream({ serviceId: 'svc', remoteAddr: '198.51.100.7:1234', proto: 'tcp' });
+  stream.end(payload);
+
+  assert.equal(await received, total);
+});

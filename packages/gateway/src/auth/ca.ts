@@ -27,8 +27,20 @@ const CA_DAYS = 3650;
 const IDENTITY_DAYS = 3650;
 
 function serial(): string {
-  // node-forge wants a positive hex integer; a leading 0 keeps it unsigned.
-  return `0${randomBytes(16).toString('hex')}`;
+  /*
+   * A certificate serial is a DER INTEGER, and OpenSSL enforces two rules on it:
+   * it must not look negative, and it must be minimally encoded. node-forge
+   * writes these bytes verbatim, so padding with a nibble ("0" + 32 hex digits)
+   * produced a leading 0x00 byte — harmless in front of a high-bit byte, but an
+   * illegal double-zero padding whenever the first random byte happened to be
+   * 0x00. That is roughly one certificate in 256, and the certificate it made
+   * could not be loaded at all: `createSecureContext` threw ERR_OSSL_ASN1_
+   * ILLEGAL_PADDING and the hostname was left without TLS. Clearing the top bit
+   * instead keeps the integer positive with no padding byte at all.
+   */
+  const bytes = randomBytes(16);
+  bytes[0] = (bytes[0] & 0x7f) || 0x01;
+  return bytes.toString('hex');
 }
 
 function nameAttrs(commonName: string): forge.pki.CertificateField[] {

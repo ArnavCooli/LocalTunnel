@@ -18,6 +18,16 @@ const AGENT_VERSION = '1.0.0';
 const METRICS_INTERVAL_MS = 30_000;
 const PROBE_INTERVAL_MS = 20_000;
 const PING_INTERVAL_MS = 15_000;
+/**
+ * Reconnect delays. A tunnel that was healthy retries almost immediately — the
+ * usual cause is the gateway restarting or a wifi blip, and every millisecond
+ * here is downtime for the user's site. Repeated failures back off quickly so a
+ * gateway that is genuinely down is not hammered.
+ */
+const RETRY_BASE_MS = 200;
+const RETRY_MAX_MS = 15_000;
+/** Jitter applied to the first retry after a working connection dropped. */
+const IMMEDIATE_RETRY_JITTER_MS = 150;
 
 export type TunnelState =
   | 'idle'
@@ -56,7 +66,7 @@ export class TunnelClient extends EventEmitter {
   private credentials: Credentials | null;
   private socket: tls.TLSSocket | null = null;
   private mux: Mux | null = null;
-  private backoff = new Backoff(1000, 30_000);
+  private backoff = new Backoff(RETRY_BASE_MS, RETRY_MAX_MS);
   private retryTimer: NodeJS.Timeout | null = null;
   private retryAt: number | null = null;
   private probeTimer: NodeJS.Timeout | null = null;
@@ -71,6 +81,8 @@ export class TunnelClient extends EventEmitter {
   private connectedSince: Date | null = null;
   private lastError: string | null = null;
   private opens = 0;
+  /** True once a tunnel has completed its handshake, until it next drops. */
+  private wasConnected = false;
   private openFailures = 0;
 
   constructor(identity = new Identity()) {
@@ -181,6 +193,7 @@ export class TunnelClient extends EventEmitter {
     switch (message.t) {
       case 'hello.ok':
         this.backoff.reset();
+        this.wasConnected = true;
         this.connectedSince = new Date();
         this.retryAt = null;
         this.setState('connected', null);
@@ -226,7 +239,8 @@ export class TunnelClient extends EventEmitter {
         rejected.push({ id: service.id, reason: (err as Error).message });
       }
     }
-    this.services = services.filter((s) => accepted.includes(s.id));
+    const allowed = new Set(accepted);
+    this.services = services.filter((s) => allowed.has(s.id));
     const probes = await this.probeAll();
     this.mux?.sendControl({ t: 'services.ack', accepted, rejected, probe: probes });
     this.emit('status', this.status());
@@ -349,7 +363,16 @@ export class TunnelClient extends EventEmitter {
     this.teardown();
     if (this.stopped) return;
 
-    const delay = this.backoff.next();
+    // A connection that was working until a moment ago comes straight back.
+    let delay: number;
+    if (this.wasConnected) {
+      this.wasConnected = false;
+      this.backoff.reset();
+      this.backoff.next();
+      delay = Math.round(Math.random() * IMMEDIATE_RETRY_JITTER_MS);
+    } else {
+      delay = this.backoff.next();
+    }
     this.retryAt = Date.now() + delay;
     this.setState('reconnecting', reason);
     this.emit('retry', { reason, delayMs: delay, attempt: this.backoff.attempts });

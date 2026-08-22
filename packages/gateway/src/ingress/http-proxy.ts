@@ -2,14 +2,31 @@ import http from 'node:http';
 import http2 from 'node:http2';
 import zlib from 'node:zlib';
 import type { Duplex } from 'node:stream';
-import type { TunnelStream } from '@localtunnel/protocol';
+import { linkDuplexPair, type TunnelStream } from '@localtunnel/protocol';
 import type { Logger } from '../main/log.js';
 import type { ServiceRecord, Store } from '../main/state.js';
-import { TunnelRegistry, TunnelUnavailableError } from '../tunnels/registry.js';
+import type { TunnelRegistry } from '../tunnels/registry.js';
 
 /** Requests and responses arrive over either protocol; the handling is shared. */
 type AnyRequest = http.IncomingMessage | http2.Http2ServerRequest;
 type AnyResponse = http.ServerResponse | http2.Http2ServerResponse;
+
+/** Bodies smaller than this are sent as-is; compressing them is a net loss. */
+const GZIP_MIN_BYTES = 1024;
+
+/**
+ * Fast compression rather than tight compression. Level 1 gives most of the size
+ * reduction of level 6 on text at a fraction of the CPU, which on a small VPS is
+ * the difference between compression being free and it being the bottleneck.
+ */
+const GZIP_OPTIONS = { level: 1, chunkSize: 32 * 1024 };
+
+/** Idle tunnel streams held open per service for the next request. */
+const MAX_IDLE_STREAMS_PER_SERVICE = 8;
+/** How long an idle pooled stream is kept before it is closed. */
+const IDLE_STREAM_TIMEOUT_MS = 30_000;
+/** Keep-alive probe interval Node applies to a pooled connection. */
+const KEEP_ALIVE_PROBE_MS = 15_000;
 
 /** How long the local service has to respond before the visitor gets a 504. */
 const UPSTREAM_TIMEOUT_MS = 60_000;
@@ -53,9 +70,16 @@ export interface HttpProxyOptions {
 export class HttpProxy {
   private server: http.Server;
   private h2Server: http2.Http2Server;
+  /** One keep-alive pool of tunnel streams per service. */
+  private pools = new Map<string, http.Agent>();
 
   constructor(private readonly options: HttpProxyOptions) {
-    this.server = http.createServer({ keepAliveTimeout: 30_000 });
+    this.server = http.createServer({
+      keepAliveTimeout: 30_000,
+      // Visitor sockets carry small, latency-sensitive writes; Nagle would hold
+      // a response header back waiting for the body.
+      noDelay: true,
+    });
     this.server.on('request', (req, res) => this.guard(this.onRequest(req, res), res));
     this.server.on('upgrade', (req, socket, head) =>
       this.onUpgrade(req, socket, head).catch(() => {
@@ -112,6 +136,49 @@ export class HttpProxy {
     this.h2Server.emit('connection', socket);
   }
 
+  /**
+   * The keep-alive pool for one service.
+   *
+   * Each pooled "socket" is a tunnel stream, and the agent at the far end keeps
+   * the matching connection to the local service open, so a repeat visitor's
+   * request skips both the stream open and the local TCP handshake. Idle streams
+   * are capped and time out, because each one costs the machine a stream from
+   * its budget and a file descriptor at home.
+   */
+  private poolFor(service: ServiceRecord, remoteAddr: string): http.Agent {
+    const key = `${service.machineId}:${service.id}`;
+    let pool = this.pools.get(key);
+    if (!pool) {
+      pool = new http.Agent({
+        keepAlive: true,
+        keepAliveMsecs: KEEP_ALIVE_PROBE_MS,
+        maxSockets: Infinity,
+        maxFreeSockets: MAX_IDLE_STREAMS_PER_SERVICE,
+        timeout: IDLE_STREAM_TIMEOUT_MS,
+      });
+      this.pools.set(key, pool);
+    }
+    // Node calls this for every connection the pool has to create; the address
+    // recorded on the stream is the visitor who caused it to be opened.
+    (pool as unknown as { createConnection: () => unknown }).createConnection = () => {
+      const stream = this.options.registry.openStream(service.machineId, service.id, remoteAddr);
+      // Refusals and tunnel drops surface as stream errors; the HTTP client turns
+      // them into the 502 above, and an unhandled 'error' would end the process.
+      stream.on('error', () => {});
+      return stream;
+    };
+    return pool;
+  }
+
+  /** Drop pooled streams for a machine — its tunnel is gone or its services changed. */
+  dropPools(machineId?: string): void {
+    for (const [key, pool] of this.pools) {
+      if (machineId && !key.startsWith(`${machineId}:`)) continue;
+      pool.destroy();
+      this.pools.delete(key);
+    }
+  }
+
   private resolve(req: AnyRequest): ServiceRecord | null {
     // HTTP/2 carries the target in :authority; HTTP/1.1 in Host.
     const authority = (req.headers[':authority'] as string | undefined) ?? req.headers.host ?? '';
@@ -132,26 +199,33 @@ export class HttpProxy {
       return;
     }
 
-    let stream: TunnelStream;
-    try {
-      stream = registry.openStream(service.machineId, service.id, remoteAddr(req.socket));
-    } catch (err) {
+    // Fail fast, with a message a person can act on, before the HTTP client is
+    // ever involved: a machine that is offline is by far the common case.
+    if (!registry.isConnected(service.machineId)) {
       store.recordServiceError(service.id);
       log.warn('no tunnel for request', {
         serviceId: service.id,
         machineId: service.machineId,
-        code: err instanceof TunnelUnavailableError ? err.code : 'unknown',
-        error: String(err),
+        code: 'machine_offline',
       });
       respondPage(res, 502, 'Service unavailable', PUBLIC_FAILURE);
       return;
     }
 
-    // The stream is torn down with a reason whenever the agent refuses the open or
-    // the tunnel drops; the HTTP client below turns that into the 502 response.
-    stream.on('error', () => {});
+    /*
+     * The stream carrying this request. With keep-alive it is usually one the
+     * pool already holds open — no OPEN frame and no fresh TCP connection to the
+     * local service — so it is only known once the client hands us the socket.
+     */
+    let stream: TunnelStream | null = null;
+    let outAtStart = 0;
+    let inAtStart = 0;
+    let refusal: string | null = null;
+    let responded = false;
+    const noteRefusal = (reason: { reason: string }) => {
+      refusal = reason.reason;
+    };
 
-    const agent = oneShotAgent(stream);
     const headers = forwardHeaders(req, service);
 
     const upstream = http.request(
@@ -160,7 +234,7 @@ export class HttpProxy {
         path: req.url,
         timeout: UPSTREAM_TIMEOUT_MS,
         headers,
-        agent,
+        agent: this.poolFor(service, remoteAddr(req.socket)),
         // The agent dials the local service itself; these are placeholders that
         // never leave this process.
         host: service.localHost,
@@ -168,8 +242,11 @@ export class HttpProxy {
       },
       (upstreamRes) => {
         const outHeaders: http.OutgoingHttpHeaders = {};
-        for (const [name, value] of Object.entries(upstreamRes.headers)) {
-          if (!HOP_BY_HOP.has(name.toLowerCase()) && value !== undefined) outHeaders[name] = value;
+        const upstreamHeaders = upstreamRes.headers;
+        for (const name in upstreamHeaders) {
+          if (HOP_BY_HOP.has(name)) continue;
+          const value = upstreamHeaders[name];
+          if (value !== undefined) outHeaders[name] = value;
         }
         if (this.options.hsts) {
           outHeaders['strict-transport-security'] = 'max-age=31536000';
@@ -181,7 +258,10 @@ export class HttpProxy {
         // not be buffered.
         const status = upstreamRes.statusCode ?? 502;
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
+        const declaredLength = Number(upstreamRes.headers['content-length'] ?? NaN);
         const compress =
+          // Below ~1 KiB gzip costs more CPU and latency than it saves bytes.
+          !(declaredLength >= 0 && declaredLength < GZIP_MIN_BYTES) &&
           /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? '')) &&
           !upstreamRes.headers['content-encoding'] &&
           !/text\/event-stream/i.test(contentType) &&
@@ -195,7 +275,7 @@ export class HttpProxy {
           outHeaders['content-encoding'] = 'gzip';
           outHeaders.vary = outHeaders.vary ? `${String(outHeaders.vary)}, Accept-Encoding` : 'Accept-Encoding';
           writeHead(res, status, outHeaders);
-          const gzip = zlib.createGzip();
+          const gzip = zlib.createGzip(GZIP_OPTIONS);
           gzip.on('error', () => res.destroy());
           upstreamRes.pipe(gzip).pipe(res as unknown as NodeJS.WritableStream);
         } else {
@@ -204,8 +284,17 @@ export class HttpProxy {
         }
 
         upstreamRes.on('end', () => {
+          responded = true;
           store.recordResponse(service.id, upstreamRes.statusCode ?? 0);
-          store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
+          if (stream) {
+            // Deltas, not totals: a pooled stream carries many requests.
+            store.recordTraffic(
+              service.id,
+              Math.max(0, stream.bytesOut - outAtStart),
+              Math.max(0, stream.bytesIn - inAtStart),
+            );
+            stream.removeListener('remote-close', noteRefusal);
+          }
         });
       },
     );
@@ -213,9 +302,11 @@ export class HttpProxy {
     // When the agent cannot reach the local service it closes the stream with a
     // reason. That reason is written for a person to read, so prefer it over
     // whatever the HTTP client makes of the socket going away.
-    let refusal: string | null = null;
-    stream.on('remote-close', (reason: { reason: string }) => {
-      refusal = reason.reason;
+    upstream.on('socket', (socket) => {
+      stream = socket as unknown as TunnelStream;
+      outAtStart = stream.bytesOut;
+      inAtStart = stream.bytesIn;
+      stream.on('remote-close', noteRefusal);
     });
 
     upstream.on('error', (err) => {
@@ -232,7 +323,8 @@ export class HttpProxy {
       } else {
         res.destroy();
       }
-      stream.destroy();
+      stream?.removeListener('remote-close', noteRefusal);
+      stream?.destroy();
     });
 
     upstream.on('timeout', () => {
@@ -251,12 +343,16 @@ export class HttpProxy {
         );
       }
       upstream.destroy();
-      stream.destroy();
+      stream?.removeListener('remote-close', noteRefusal);
+      stream?.destroy();
     });
 
     req.pipe(upstream as unknown as NodeJS.WritableStream);
     res.on('close', () => {
-      if (!stream.destroyed) stream.destroy();
+      // A completed response leaves its stream in the pool for the next visitor.
+      // An abandoned one cannot be reused — the rest of the body is still coming
+      // — so it goes.
+      if (!responded && stream && !stream.destroyed) stream.destroy();
     });
   }
 
@@ -295,15 +391,13 @@ export class HttpProxy {
     stream.pipe(socket);
     socket.pipe(stream);
 
-    const cleanup = () => {
+    // Ends each side when its partner finishes rather than destroying it, so a
+    // final WebSocket frame is not dropped, and counts the connection's traffic
+    // exactly once — 'error' and 'close' on both sides used to count it up to
+    // four times.
+    linkDuplexPair(socket, stream, () => {
       store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
-      if (!stream.destroyed) stream.destroy();
-      if (!socket.destroyed) socket.destroy();
-    };
-    socket.on('error', cleanup);
-    socket.on('close', cleanup);
-    stream.on('error', cleanup);
-    stream.on('close', cleanup);
+    });
   }
 }
 
@@ -311,20 +405,18 @@ function writeHead(res: AnyResponse, status: number, headers: http.OutgoingHttpH
   (res as http.ServerResponse).writeHead(status, headers);
 }
 
-/** An http.Agent that hands the client exactly one pre-made connection. */
-function oneShotAgent(stream: TunnelStream): http.Agent {
-  const agent = new http.Agent({ keepAlive: false, maxSockets: 1 });
-  (agent as unknown as { createConnection: () => unknown }).createConnection = () => stream;
-  return agent;
-}
-
 function forwardHeaders(req: AnyRequest, service: ServiceRecord): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(req.headers)) {
+  const incoming = req.headers;
+  // Node lower-cases incoming header names on both protocols, so no per-header
+  // allocation is needed here — and `for..in` avoids materialising the entries.
+  for (const name in incoming) {
     // `:method`, `:path`, `:scheme`, `:authority` are HTTP/2 pseudo-headers and are
     // rejected by an HTTP/1.1 client, so they are translated rather than copied.
-    if (name.startsWith(':')) continue;
-    if (!HOP_BY_HOP.has(name.toLowerCase()) && value !== undefined) headers[name] = value;
+    if (name.charCodeAt(0) === 58 /* ':' */) continue;
+    if (HOP_BY_HOP.has(name)) continue;
+    const value = incoming[name as keyof typeof incoming];
+    if (value !== undefined) headers[name] = value as string | string[];
   }
   const clientIp = remoteIp(req.socket);
   // Set, never append. A visitor can send any X-Forwarded-For they like, and

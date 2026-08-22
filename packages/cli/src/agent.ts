@@ -143,10 +143,15 @@ export async function ensureAgentRunning(): Promise<'already' | 'started'> {
   });
   child.unref();
 
+  // Fast first checks, easing off: the agent is normally answering within tens
+  // of milliseconds, and waiting a quarter second to find that out is a quarter
+  // second of the user's time on every `lt` command that starts it.
   const deadline = Date.now() + 15_000;
+  let wait = 5;
   while (Date.now() < deadline) {
     if (await agent.running()) return 'started';
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, wait));
+    wait = Math.min(wait * 2, 200);
   }
   throw new AgentError(`The agent did not start. Check ${logPath} for what went wrong.`);
 }

@@ -38,7 +38,12 @@ export class AdminApi {
   private server: http.Server;
 
   constructor(private readonly deps: AdminDeps) {
-    this.server = http.createServer((req, res) => void this.route(req, res));
+    // Keep-alive with a generous idle window: the desktop app polls this API, and
+    // a fresh TCP + TLS handshake per poll is two extra round trips to the VPS.
+    this.server = http.createServer(
+      { keepAliveTimeout: 65_000, noDelay: true },
+      (req, res) => void this.route(req, res),
+    );
     this.server.on('clientError', (_e, socket) => socket.destroy());
   }
 

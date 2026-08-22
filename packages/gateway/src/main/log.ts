@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { createWriteStream, mkdirSync, renameSync, statSync, type WriteStream } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -65,23 +65,52 @@ export class Logger {
     if (this.file) this.appendRotating(line);
   }
 
+  /**
+   * Append without touching the event loop.
+   *
+   * This used to mkdir + stat + appendFileSync on every single line, which is
+   * three blocking syscalls per log write on a process whose whole job is
+   * forwarding bytes. The stream is opened once, the size is tracked in memory,
+   * and rotation only stats when the counter says it might be due.
+   */
   private appendRotating(line: string): void {
     try {
-      mkdirSync(dirname(this.file!), { recursive: true });
-      try {
-        if (statSync(this.file!).size > MAX_BYTES) this.rotate();
-      } catch {
-        /* file does not exist yet */
-      }
-      appendFileSync(this.file!, `${line}\n`);
+      const sink = this.sink();
+      if (!sink) return;
+      sink.stream.write(`${line}\n`);
+      sink.size += line.length + 1;
+      if (sink.size > MAX_BYTES) this.rotate();
     } catch {
       /* never let logging take the gateway down */
     }
   }
 
+  private sink(): FileSink | null {
+    const file = this.file;
+    if (!file) return null;
+    let sink = SINKS.get(file);
+    if (sink) return sink;
+    mkdirSync(dirname(file), { recursive: true });
+    let size = 0;
+    try {
+      size = statSync(file).size;
+    } catch {
+      /* file does not exist yet */
+    }
+    const stream = createWriteStream(file, { flags: 'a', mode: 0o600 });
+    stream.on('error', () => SINKS.delete(file));
+    sink = { stream, size };
+    SINKS.set(file, sink);
+    return sink;
+  }
+
   private rotate(): void {
-    const dir = dirname(this.file!);
-    const base = this.file!.slice(dir.length + 1);
+    const file = this.file!;
+    const sink = SINKS.get(file);
+    SINKS.delete(file);
+    sink?.stream.end();
+    const dir = dirname(file);
+    const base = file.slice(dir.length + 1);
     for (let i = MAX_FILES - 1; i >= 1; i--) {
       try {
         renameSync(join(dir, `${base}.${i}`), join(dir, `${base}.${i + 1}`));
@@ -90,12 +119,20 @@ export class Logger {
       }
     }
     try {
-      renameSync(this.file!, join(dir, `${base}.1`));
+      renameSync(file, join(dir, `${base}.1`));
     } catch {
       /* ignore */
     }
   }
 }
+
+interface FileSink {
+  stream: WriteStream;
+  size: number;
+}
+
+/** One append stream per file, shared by every child logger writing to it. */
+const SINKS = new Map<string, FileSink>();
 
 export function createRootLogger(file: string | null, level: LogLevel = 'info'): Logger {
   return new Logger('gateway', { file, level });

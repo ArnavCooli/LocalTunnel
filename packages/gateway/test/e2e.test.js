@@ -172,9 +172,14 @@ test('the tunnel reconnects by itself after the connection drops', async (t) => 
 
   assert.equal((await publicRequest(env.ctx, HOSTNAME, '/')).status, 200);
 
+  // The agent now comes back within milliseconds of noticing, so the drop is
+  // observed through its event rather than by polling for a state that no longer
+  // lingers long enough to be sampled.
+  const noticed = new Promise((resolve) => env.client.once('retry', resolve));
+
   // Simulate the home internet dropping: kill the tunnel from the gateway side.
   env.ctx.gateway.registry.drop(env.credentials.machineId, 'test: simulated network drop');
-  await waitFor(() => env.client.status().state === 'reconnecting', { label: 'agent to notice' });
+  await noticed;
 
   await waitFor(() => env.client.status().state === 'connected', {
     label: 'agent to reconnect',
@@ -472,4 +477,47 @@ test('an image is not compressed', async (t) => {
   await env.publish();
   const res = await publicRequest(env.ctx, HOSTNAME, '/x.png', { headers: { 'accept-encoding': 'gzip' } });
   assert.equal(res.headers['content-encoding'], undefined);
+});
+
+test('repeat requests reuse one tunnel stream and one local connection', async (t) => {
+  const env = await scaffold();
+  t.after(() => env.teardown());
+  await env.publish();
+
+  let localConnections = 0;
+  env.site.server.on('connection', () => {
+    localConnections += 1;
+  });
+
+  for (let i = 0; i < 5; i++) {
+    const res = await publicRequest(env.ctx, HOSTNAME, `/page-${i}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.body, `hello from home: /page-${i}`);
+  }
+
+  assert.equal(
+    localConnections,
+    1,
+    `five requests should share one keep-alive connection to the local service, opened ${localConnections}`,
+  );
+});
+
+test('a pooled stream is not reused after its machine reconnects', async (t) => {
+  const env = await scaffold();
+  t.after(() => env.teardown());
+  await env.publish();
+
+  assert.equal((await publicRequest(env.ctx, HOSTNAME, '/first')).status, 200);
+
+  const noticed = new Promise((resolve) => env.client.once('retry', resolve));
+  env.ctx.gateway.registry.drop(env.credentials.machineId, 'test: simulated network drop');
+  await noticed;
+  await waitFor(() => env.client.status().state === 'connected', {
+    label: 'agent to reconnect',
+    timeoutMs: 20000,
+  });
+
+  const after = await publicRequest(env.ctx, HOSTNAME, '/second');
+  assert.equal(after.status, 200, 'a request after the reconnect is served on a fresh stream');
+  assert.equal(after.body, 'hello from home: /second');
 });

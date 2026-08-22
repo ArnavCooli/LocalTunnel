@@ -40,44 +40,49 @@ export interface DiagnosticsInput {
 }
 
 export async function runDiagnostics(input: DiagnosticsInput): Promise<CheckResult[]> {
-  const results: CheckResult[] = [];
-
-  results.push(await checkInternet());
-  results.push(await checkCgnat());
-
-  if (!input.connection) {
-    results.push({
-      id: 'gateway',
-      label: 'Gateway',
-      state: 'fail',
-      detail: 'No gateway has been set up yet.',
-      fix: 'Open the Gateways tab and set up your VPS gateway.',
-    });
-    return results;
+  // Every network check here has a multi-second timeout of its own and none of
+  // them depend on each other's results, so they run together: a full run is as
+  // slow as its slowest check rather than as slow as all of them added up.
+  const connection = input.connection;
+  if (!connection) {
+    const [internet, cgnat] = await Promise.all([checkInternet(), checkCgnat()]);
+    return [
+      internet,
+      cgnat,
+      {
+        id: 'gateway',
+        label: 'Gateway',
+        state: 'fail',
+        detail: 'No gateway has been set up yet.',
+        fix: 'Open the Gateways tab and set up your VPS gateway.',
+      },
+    ];
   }
 
-  const gatewayReachable = await checkGatewayPort(input.connection);
-  results.push(gatewayReachable);
-
-  const gatewayApiCheck = await checkGatewayApi(input.connection);
-  results.push(gatewayApiCheck);
-
+  const results = await Promise.all([
+    checkInternet(),
+    checkCgnat(),
+    checkGatewayPort(connection),
+    checkGatewayApi(connection),
+  ]);
   results.push(checkAgent(input.agentStatus));
 
   const service = input.service ?? null;
-  if (!service) {
-    return results;
-  }
+  if (!service) return results;
 
   results.push(checkTunnelForService(service));
   results.push(checkLocalService(service, input.agentStatus));
 
   if (service.hostname) {
-    results.push(await checkDns(service.hostname, input.connection.host));
-    results.push(await checkTls(service.hostname, input.connection.host, input.connection.port));
-    results.push(await checkEndToEnd(service.hostname, input.connection.host));
+    results.push(
+      ...(await Promise.all([
+        checkDns(service.hostname, connection.host),
+        checkTls(service.hostname, connection.host, connection.port),
+        checkEndToEnd(service.hostname, connection.host),
+      ])),
+    );
   } else if (service.publicPort) {
-    results.push(await checkPublicPort(input.connection.host, service.publicPort));
+    results.push(await checkPublicPort(connection.host, service.publicPort));
   }
 
   return results;

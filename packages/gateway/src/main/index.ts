@@ -43,7 +43,7 @@ export async function startGateway(config: GatewayConfig, logger?: Logger): Prom
   const registry = new TunnelRegistry(
     store,
     log.child('tunnels'),
-    { streamsPerMachine: config.limits.streamsPerMachine },
+    { streamsPerMachine: config.limits.streamsPerMachine, heartbeatMs: config.limits.heartbeatMs },
     config.publicIp,
     config.gatewayId,
   );
@@ -70,10 +70,17 @@ export async function startGateway(config: GatewayConfig, logger?: Logger): Prom
     limiter: new RateLimiter(config.limits.adminFailuresPerIp, FIFTEEN_MINUTES),
     onChange: async () => {
       registry.syncAll();
+      // A service that changed may now point somewhere else; pooled tunnel
+      // streams for it must not outlive that change.
+      proxy.dropPools();
       await forwarder.reconcile();
     },
     startedAt,
   });
+
+  // Streams pooled for a machine die with its tunnel; drop them rather than
+  // handing a dead one to the next request.
+  registry.on('disconnected', (machineId: string) => proxy.dropPools(machineId));
 
   await certificates.init(store.certificateHostnames());
   await forwarder.reconcile();
@@ -126,6 +133,7 @@ export async function startGateway(config: GatewayConfig, logger?: Logger): Prom
     stop: async () => {
       clearInterval(expiryTimer);
       registry.shutdown();
+      proxy.dropPools();
       forwarder.close();
       ingress.close();
       store.save();

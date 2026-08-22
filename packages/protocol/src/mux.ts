@@ -4,6 +4,7 @@ import {
   DEFAULT_WINDOW,
   FrameParser,
   FrameType,
+  encodeHeader,
   MAX_CONCURRENT_STREAMS,
   MAX_DATA_CHUNK,
   MAX_STREAM_ID,
@@ -31,6 +32,8 @@ export class TunnelStream extends Duplex {
   private sendWindow = DEFAULT_WINDOW;
   private ungrantedBytes = 0;
   private inbound: Buffer[] = [];
+  /** Read cursor into `inbound`, so draining is not a repeated O(n) shift. */
+  private inboundHead = 0;
   /**
    * Bytes received for which no credit has been handed back yet. Flow control is
    * only a bound on memory if the *receiver* enforces it, so this is checked
@@ -60,6 +63,7 @@ export class TunnelStream extends Duplex {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
     if (this.shutDown) return callback(new Error('stream closed'));
     if (buf.length === 0) return callback();
+    this.touch();
     this.pump(buf, callback);
   }
 
@@ -109,6 +113,7 @@ export class TunnelStream extends Duplex {
   /** Called by the mux when a DATA frame arrives for this stream. */
   acceptData(payload: Buffer): void {
     if (this.shutDown) return;
+    this.touch();
     this.receiveOutstanding += payload.length;
     if (this.receiveOutstanding > DEFAULT_WINDOW + WINDOW_OVERRUN_SLACK) {
       // The peer is ignoring the window it was granted. Queueing the data anyway
@@ -123,9 +128,19 @@ export class TunnelStream extends Duplex {
     this.drainInbound();
   }
 
+  private get queued(): number {
+    return this.inbound.length - this.inboundHead;
+  }
+
   private drainInbound(): void {
-    while (this.flowing && this.inbound.length > 0) {
-      const chunk = this.inbound.shift()!;
+    while (this.flowing && this.inboundHead < this.inbound.length) {
+      const chunk = this.inbound[this.inboundHead];
+      this.inbound[this.inboundHead] = undefined as unknown as Buffer;
+      this.inboundHead += 1;
+      if (this.inboundHead === this.inbound.length) {
+        this.inbound.length = 0;
+        this.inboundHead = 0;
+      }
       const wantsMore = this.push(chunk);
       this.ungrantedBytes += chunk.length;
       if (!wantsMore) {
@@ -133,14 +148,25 @@ export class TunnelStream extends Duplex {
         break;
       }
     }
-    // Only hand back credit for bytes the consumer has taken.
-    if (this.ungrantedBytes >= DEFAULT_WINDOW / 2) {
+    /*
+     * Hand back credit for bytes the consumer has taken.
+     *
+     * Half a window is the batching threshold. On its own that deadlocks: a peer
+     * that has just filled its window parks its last chunk, we sit on credit
+     * below the threshold waiting for data that cannot come, and the stream
+     * stops for good. So a consumer that has caught up also releases credit as
+     * soon as the peer could be running low — while a consumer keeping pace with
+     * a fast sender still batches, rather than answering every chunk.
+     */
+    const drained = this.queued === 0;
+    const peerMayBeStarved = this.receiveOutstanding >= DEFAULT_WINDOW / 4;
+    if (this.ungrantedBytes > 0 && (this.ungrantedBytes >= DEFAULT_WINDOW / 2 || (drained && peerMayBeStarved))) {
       const credits = this.ungrantedBytes;
       this.ungrantedBytes = 0;
       this.receiveOutstanding = Math.max(0, this.receiveOutstanding - credits);
       if (!this.shutDown) this.mux.sendFrame(FrameType.WINDOW, this.id, credits);
     }
-    if (this.remoteEnded && this.inbound.length === 0) {
+    if (this.remoteEnded && this.queued === 0) {
       this.push(null);
     }
   }
@@ -151,7 +177,7 @@ export class TunnelStream extends Duplex {
     if (reason?.reason) {
       this.emit('remote-close', reason);
     }
-    if (this.inbound.length === 0) this.push(null);
+    if (this.queued === 0) this.push(null);
     this.maybeDestroy();
   }
 
@@ -163,6 +189,11 @@ export class TunnelStream extends Duplex {
   }
 
   override _destroy(err: Error | null, callback: (err: Error | null) => void): void {
+    if (this.timeoutTimer) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
+    this.timeoutCallback = null;
     if (!this.shutDown) {
       this.shutDown = true;
       const payload: CloseReason | undefined = err ? { reason: err.message } : undefined;
@@ -182,9 +213,25 @@ export class TunnelStream extends Duplex {
    * usable directly as `createConnection` output.
    */
 
+  /**
+   * The same contract as `net.Socket.setTimeout`: an *idle* timeout, re-armed by
+   * traffic, and one callback at a time. Both halves matter now that a stream is
+   * reused for many requests — an absolute timer would cut off a long download,
+   * and a callback added per request would leak listeners for the stream's life.
+   */
   setTimeout(ms: number, callback?: () => void): this {
-    if (callback) this.once('timeout', callback);
-    if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
+    if (this.timeoutCallback) {
+      this.removeListener('timeout', this.timeoutCallback);
+      this.timeoutCallback = null;
+    }
+    if (callback) {
+      this.timeoutCallback = callback;
+      this.once('timeout', callback);
+    }
+    if (this.timeoutTimer) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
     if (ms > 0) {
       this.timeoutTimer = setTimeout(() => this.emit('timeout'), ms);
       this.timeoutTimer.unref?.();
@@ -214,6 +261,12 @@ export class TunnelStream extends Duplex {
   }
 
   private timeoutTimer: NodeJS.Timeout | null = null;
+  private timeoutCallback: (() => void) | null = null;
+
+  /** Traffic in either direction pushes the idle timeout back. */
+  private touch(): void {
+    this.timeoutTimer?.refresh();
+  }
 
   /** Tear down without emitting another CLOSE — used when the whole tunnel drops. */
   abort(err: Error): void {
@@ -277,12 +330,26 @@ export class Mux extends EventEmitter {
 
   sendFrame(type: FrameType, streamId: number, payload?: Buffer | number): void {
     if (this.ended) return;
-    let frame: Buffer;
     if (type === FrameType.WINDOW && typeof payload === 'number') {
-      frame = encodeWindowFrame(streamId, payload);
-    } else {
-      frame = encodeFrame(type, streamId, payload as Buffer | undefined);
+      const frame = encodeWindowFrame(streamId, payload);
+      this.bytesOut += frame.length;
+      this.socket.write(frame);
+      return;
     }
+    const body = payload as Buffer | undefined;
+    if (body !== undefined && body.length > 0) {
+      // Header and payload are corked into one write rather than copied into a
+      // single buffer: on a 64 KiB DATA frame that copy was the most expensive
+      // thing on the forwarding path, and the socket still emits one TLS record.
+      const header = encodeHeader(type, streamId, body.length);
+      this.bytesOut += header.length + body.length;
+      this.socket.cork();
+      this.socket.write(header);
+      this.socket.write(body);
+      this.socket.uncork();
+      return;
+    }
+    const frame = encodeFrame(type, streamId, undefined);
     this.bytesOut += frame.length;
     this.socket.write(frame);
   }
@@ -407,7 +474,7 @@ export class Mux extends EventEmitter {
         stream.emit('open-ok');
         break;
       case FrameType.DATA:
-        stream.acceptData(Buffer.from(payload));
+        stream.acceptData(payload);
         break;
       case FrameType.WINDOW:
         if (payload.length !== 4) throw new ProtocolError('WINDOW payload must be 4 bytes');
