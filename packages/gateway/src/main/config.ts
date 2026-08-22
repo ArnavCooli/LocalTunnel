@@ -19,6 +19,12 @@ export interface Limits {
   adminFailuresPerIp: number;
   tlsHandshakeTimeoutMs: number;
   idleConnectionTimeoutMs: number;
+  /**
+   * How often the gateway pings each tunnel. A tunnel silent for three of these
+   * is dropped, and the value is sent to the agent in the hello, so both ends
+   * agree on how quickly a dead connection is noticed.
+   */
+  heartbeatMs: number;
 }
 
 export interface GatewayConfig {
@@ -71,6 +77,7 @@ export const DEFAULT_LIMITS: Limits = {
   adminFailuresPerIp: 5,
   tlsHandshakeTimeoutMs: 10_000,
   idleConnectionTimeoutMs: 120_000,
+  heartbeatMs: 15_000,
 };
 
 export const LETS_ENCRYPT_PRODUCTION = 'https://acme-v02.api.letsencrypt.org/directory';

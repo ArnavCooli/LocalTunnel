@@ -1,6 +1,7 @@
 import net from 'node:net';
 import dgram from 'node:dgram';
 import type { Logger } from '../main/log.js';
+import { linkDuplexPair } from '@localtunnel/protocol';
 import type { Store } from '../main/state.js';
 import type { TunnelRegistry } from '../tunnels/registry.js';
 import type { ConnectionCounter } from '../auth/limits.js';
@@ -120,19 +121,12 @@ export class TcpForwarder {
     socket.pipe(stream);
     stream.pipe(socket);
 
-    let released = false;
-    const cleanup = () => {
-      if (released) return;
-      released = true;
+    // Ending rather than destroying: a service that answers and hangs up must
+    // still have its last bytes delivered to the visitor.
+    linkDuplexPair(socket, stream, () => {
       this.connections.release(ip);
       this.store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
-      if (!socket.destroyed) socket.destroy();
-      if (!stream.destroyed) stream.destroy();
-    };
-    socket.on('error', cleanup);
-    socket.on('close', cleanup);
-    stream.on('error', cleanup);
-    stream.on('close', cleanup);
+    });
   }
 
   /**

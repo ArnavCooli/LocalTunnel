@@ -204,11 +204,23 @@ export class CertificateManager {
   }
 
   private install(hostname: string, certPem: string, keyPem: string): void {
+    let context;
+    try {
+      context = createSecureContext({ cert: certPem, key: keyPem, minVersion: 'TLSv1.2' });
+    } catch (err) {
+      // A certificate OpenSSL will not load is a failure for this hostname, not
+      // for the gateway: record it, keep whatever was already being served, and
+      // let the retry path try again rather than rejecting into the void.
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.error('generated certificate could not be loaded', { hostname, error: message });
+      this.states.set(hostname, { state: 'error', error: message, detail: null });
+      return;
+    }
     const entry: Entry = {
       hostname,
       certPem,
       keyPem,
-      context: createSecureContext({ cert: certPem, key: keyPem, minVersion: 'TLSv1.2' }),
+      context,
       expiresAt: certificateExpiry(certPem),
     };
     this.entries.set(hostname, entry);

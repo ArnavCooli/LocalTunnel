@@ -63,6 +63,7 @@ export class TunnelStream extends Duplex {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
     if (this.shutDown) return callback(new Error('stream closed'));
     if (buf.length === 0) return callback();
+    this.touch();
     this.pump(buf, callback);
   }
 
@@ -112,6 +113,7 @@ export class TunnelStream extends Duplex {
   /** Called by the mux when a DATA frame arrives for this stream. */
   acceptData(payload: Buffer): void {
     if (this.shutDown) return;
+    this.touch();
     this.receiveOutstanding += payload.length;
     if (this.receiveOutstanding > DEFAULT_WINDOW + WINDOW_OVERRUN_SLACK) {
       // The peer is ignoring the window it was granted. Queueing the data anyway
@@ -146,8 +148,19 @@ export class TunnelStream extends Duplex {
         break;
       }
     }
-    // Only hand back credit for bytes the consumer has taken.
-    if (this.ungrantedBytes >= DEFAULT_WINDOW / 2) {
+    /*
+     * Hand back credit for bytes the consumer has taken.
+     *
+     * Half a window is the batching threshold. On its own that deadlocks: a peer
+     * that has just filled its window parks its last chunk, we sit on credit
+     * below the threshold waiting for data that cannot come, and the stream
+     * stops for good. So a consumer that has caught up also releases credit as
+     * soon as the peer could be running low — while a consumer keeping pace with
+     * a fast sender still batches, rather than answering every chunk.
+     */
+    const drained = this.queued === 0;
+    const peerMayBeStarved = this.receiveOutstanding >= DEFAULT_WINDOW / 4;
+    if (this.ungrantedBytes > 0 && (this.ungrantedBytes >= DEFAULT_WINDOW / 2 || (drained && peerMayBeStarved))) {
       const credits = this.ungrantedBytes;
       this.ungrantedBytes = 0;
       this.receiveOutstanding = Math.max(0, this.receiveOutstanding - credits);
@@ -180,6 +193,7 @@ export class TunnelStream extends Duplex {
       clearTimeout(this.timeoutTimer);
       this.timeoutTimer = null;
     }
+    this.timeoutCallback = null;
     if (!this.shutDown) {
       this.shutDown = true;
       const payload: CloseReason | undefined = err ? { reason: err.message } : undefined;
@@ -199,9 +213,25 @@ export class TunnelStream extends Duplex {
    * usable directly as `createConnection` output.
    */
 
+  /**
+   * The same contract as `net.Socket.setTimeout`: an *idle* timeout, re-armed by
+   * traffic, and one callback at a time. Both halves matter now that a stream is
+   * reused for many requests — an absolute timer would cut off a long download,
+   * and a callback added per request would leak listeners for the stream's life.
+   */
   setTimeout(ms: number, callback?: () => void): this {
-    if (callback) this.once('timeout', callback);
-    if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
+    if (this.timeoutCallback) {
+      this.removeListener('timeout', this.timeoutCallback);
+      this.timeoutCallback = null;
+    }
+    if (callback) {
+      this.timeoutCallback = callback;
+      this.once('timeout', callback);
+    }
+    if (this.timeoutTimer) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
     if (ms > 0) {
       this.timeoutTimer = setTimeout(() => this.emit('timeout'), ms);
       this.timeoutTimer.unref?.();
@@ -231,6 +261,12 @@ export class TunnelStream extends Duplex {
   }
 
   private timeoutTimer: NodeJS.Timeout | null = null;
+  private timeoutCallback: (() => void) | null = null;
+
+  /** Traffic in either direction pushes the idle timeout back. */
+  private touch(): void {
+    this.timeoutTimer?.refresh();
+  }
 
   /** Tear down without emitting another CLOSE — used when the whole tunnel drops. */
   abort(err: Error): void {

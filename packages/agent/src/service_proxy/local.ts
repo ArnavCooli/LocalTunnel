@@ -1,6 +1,6 @@
 import net from 'node:net';
 import { isIP } from 'node:net';
-import type { ServiceDescriptor, ServiceProbe, TunnelStream } from '@localtunnel/protocol';
+import { linkDuplexPair, type ServiceDescriptor, type ServiceProbe, type TunnelStream } from '@localtunnel/protocol';
 
 const DIAL_TIMEOUT_MS = 10_000;
 const PROBE_TIMEOUT_MS = 2_000;
@@ -114,15 +114,7 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
       }
       socket.pipe(stream);
       stream.pipe(socket);
-
-      const cleanup = () => {
-        if (!socket.destroyed) socket.destroy();
-        if (!stream.destroyed) stream.destroy();
-      };
-      socket.on('error', cleanup);
-      socket.on('close', cleanup);
-      stream.on('error', cleanup);
-      stream.on('close', cleanup);
+      linkDuplexPair(socket, stream);
       resolve();
     });
 

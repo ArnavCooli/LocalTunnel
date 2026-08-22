@@ -12,7 +12,7 @@ import {
 import type { Logger } from '../main/log.js';
 import type { Store } from '../main/state.js';
 
-const HEARTBEAT_MS = 15_000;
+const DEFAULT_HEARTBEAT_MS = 15_000;
 const MISSED_HEARTBEATS_ALLOWED = 2;
 const GATEWAY_VERSION = '1.0.0';
 
@@ -44,19 +44,20 @@ class Tunnel {
   constructor(
     socket: Duplex,
     hello: HelloMessage,
+    private readonly heartbeatMs: number,
     private readonly onDead: (reason: string) => void,
   ) {
     this.machineId = hello.machineId;
     this.hello = hello;
     this.mux = new Mux(socket, { role: 'gateway' });
 
-    this.heartbeat = setInterval(() => this.beat(), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => this.beat(), this.heartbeatMs);
     this.heartbeat.unref();
   }
 
   private beat(): void {
     const silentFor = Date.now() - this.lastPong;
-    if (silentFor > HEARTBEAT_MS * MISSED_HEARTBEATS_ALLOWED) {
+    if (silentFor > this.heartbeatMs * MISSED_HEARTBEATS_ALLOWED) {
       this.onDead(`no heartbeat for ${Math.round(silentFor / 1000)}s`);
       return;
     }
@@ -85,11 +86,15 @@ export class TunnelRegistry extends EventEmitter {
   constructor(
     private readonly store: Store,
     private readonly log: Logger,
-    private readonly limits: { streamsPerMachine: number },
+    private readonly limits: { streamsPerMachine: number; heartbeatMs?: number },
     private readonly publicIp: string,
     private readonly gatewayId: string,
   ) {
     super();
+  }
+
+  private get heartbeatMs(): number {
+    return this.limits.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   }
 
   isConnected(machineId: string): boolean {
@@ -145,7 +150,7 @@ export class TunnelRegistry extends EventEmitter {
     }
 
     // The machine id is taken from the verified client certificate, not from hello.
-    const tunnel = new Tunnel(socket, { ...hello, machineId }, (reason) =>
+    const tunnel = new Tunnel(socket, { ...hello, machineId }, this.heartbeatMs, (reason) =>
       this.drop(machineId, reason),
     );
     this.tunnels.set(machineId, tunnel);
@@ -168,7 +173,7 @@ export class TunnelRegistry extends EventEmitter {
       gatewayVersion: GATEWAY_VERSION,
       gatewayId: this.gatewayId,
       publicIp: this.publicIp,
-      heartbeatMs: HEARTBEAT_MS,
+      heartbeatMs: this.heartbeatMs,
     });
     this.syncServices(machineId);
 
