@@ -1,8 +1,14 @@
-# Builds the desktop app on every supported platform and publishes a GitHub release.
+# Builds the desktop app on every supported platform, and publishes a GitHub
+# release when it is run by hand.
 #
 # Each platform is built on its own runner because the installer formats are not
 # cross-buildable: .dmg needs macOS (hdiutil), NSIS needs Windows (or wine), and
 # the .deb is assembled from the Linux electron-builder output.
+#
+# The build half also serves as CI: it runs on pushes to main and on pull
+# requests, so a change that breaks the build or the tests is caught before
+# someone asks for a release rather than during one. Publishing stays manual —
+# only a `workflow_dispatch` run creates a release.
 name: Release
 
 on:
@@ -14,7 +20,10 @@ on:
         default: '1.2'
   push:
     branches:
-      - claude/app-rebuild-github-release-kntacu
+      - main
+  pull_request:
+    branches:
+      - main
 
 env:
   RELEASE_TAG: ${{ github.event.inputs.tag || '1.2' }}
@@ -54,12 +63,17 @@ jobs:
       - name: Build packages
         run: npm run build
 
+      # `test:node` is the same command a contributor runs locally, rather than a
+      # copy of it that can drift: it builds everything the suites need — the
+      # desktop main process included, because the gateway suite exercises the
+      # desktop app's admin client — and then runs them.
+      #
       # The agent's control channel is a unix-domain socket with 0600 permissions,
       # so its tests cannot run on Windows. Linux and macOS cover them.
       - name: Test
         if: matrix.os != 'windows-latest'
         shell: bash
-        run: node --test --test-timeout=120000 "packages/protocol/test/*.test.js" "packages/agent/test/*.test.js" "packages/gateway/test/*.test.js"
+        run: npm run test:node
 
       - name: Bundle gateway
         shell: bash
@@ -110,6 +124,8 @@ jobs:
   release:
     name: Publish release
     needs: build
+    # Only a run started by hand publishes; a push or a pull request just builds.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
