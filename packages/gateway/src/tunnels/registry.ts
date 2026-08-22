@@ -13,7 +13,7 @@ import type { Logger } from '../main/log.js';
 import type { Store } from '../main/state.js';
 
 const HEARTBEAT_MS = 15_000;
-const MISSED_HEARTBEATS_ALLOWED = 3;
+const MISSED_HEARTBEATS_ALLOWED = 2;
 const GATEWAY_VERSION = '1.0.0';
 
 export interface TunnelInfo {

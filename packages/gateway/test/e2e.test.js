@@ -172,9 +172,14 @@ test('the tunnel reconnects by itself after the connection drops', async (t) => 
 
   assert.equal((await publicRequest(env.ctx, HOSTNAME, '/')).status, 200);
 
+  // The agent now comes back within milliseconds of noticing, so the drop is
+  // observed through its event rather than by polling for a state that no longer
+  // lingers long enough to be sampled.
+  const noticed = new Promise((resolve) => env.client.once('retry', resolve));
+
   // Simulate the home internet dropping: kill the tunnel from the gateway side.
   env.ctx.gateway.registry.drop(env.credentials.machineId, 'test: simulated network drop');
-  await waitFor(() => env.client.status().state === 'reconnecting', { label: 'agent to notice' });
+  await noticed;
 
   await waitFor(() => env.client.status().state === 'connected', {
     label: 'agent to reconnect',

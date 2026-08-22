@@ -97,6 +97,11 @@ export function connectPinned(options: {
       reject(new Error(`The gateway at ${options.host}:${options.port} did not respond.`));
     }, ENROLL_TIMEOUT_MS);
 
+    // Tunnel frames are small and latency-critical; Nagle would batch them with
+    // whatever came next, adding up to a round trip to every forwarded request.
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 15_000);
+
     socket.once('secureConnect', () => {
       clearTimeout(timer);
       const peer = socket.getPeerCertificate();

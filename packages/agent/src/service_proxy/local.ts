@@ -96,7 +96,8 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
   return new Promise((resolve, reject) => {
     assertAllowed(service);
 
-    const socket = net.connect({ host: service.localHost, port: service.localPort });
+    // noDelay from the first packet: the request head is usually already waiting.
+    const socket = net.connect({ host: service.localHost, port: service.localPort, noDelay: true });
     const timer = setTimeout(() => {
       socket.destroy();
       reject(new Error(`Timed out connecting to ${service.localHost}:${service.localPort}.`));
@@ -111,7 +112,6 @@ export function connectLocal(service: ServiceDescriptor, stream: TunnelStream): 
         reject(err as Error);
         return;
       }
-      socket.setNoDelay(true);
       socket.pipe(stream);
       stream.pipe(socket);
 

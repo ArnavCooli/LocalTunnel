@@ -63,13 +63,18 @@ export class AgentSupervisor extends EventEmitter {
     });
     this.child.unref();
 
-    // The IPC socket appears a moment after the process starts.
-    for (let attempt = 0; attempt < 40; attempt++) {
+    // The IPC socket appears a moment after the process starts. Poll hard at
+    // first — it is usually listening within a few tens of milliseconds — then
+    // ease off so a genuinely broken start is not a busy loop.
+    const deadline = Date.now() + 4000;
+    let wait = 5;
+    while (Date.now() < deadline) {
       if (await this.ping()) {
         this.startPolling();
         return;
       }
-      await delay(100);
+      await delay(wait);
+      wait = Math.min(wait * 2, 100);
     }
     const detail = output.trim().split('\n').slice(-3).join('\n');
     throw new Error(

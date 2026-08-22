@@ -11,6 +11,16 @@ import { TunnelRegistry, TunnelUnavailableError } from '../tunnels/registry.js';
 type AnyRequest = http.IncomingMessage | http2.Http2ServerRequest;
 type AnyResponse = http.ServerResponse | http2.Http2ServerResponse;
 
+/** Bodies smaller than this are sent as-is; compressing them is a net loss. */
+const GZIP_MIN_BYTES = 1024;
+
+/**
+ * Fast compression rather than tight compression. Level 1 gives most of the size
+ * reduction of level 6 on text at a fraction of the CPU, which on a small VPS is
+ * the difference between compression being free and it being the bottleneck.
+ */
+const GZIP_OPTIONS = { level: 1, chunkSize: 32 * 1024 };
+
 /** How long the local service has to respond before the visitor gets a 504. */
 const UPSTREAM_TIMEOUT_MS = 60_000;
 
@@ -55,7 +65,12 @@ export class HttpProxy {
   private h2Server: http2.Http2Server;
 
   constructor(private readonly options: HttpProxyOptions) {
-    this.server = http.createServer({ keepAliveTimeout: 30_000 });
+    this.server = http.createServer({
+      keepAliveTimeout: 30_000,
+      // Visitor sockets carry small, latency-sensitive writes; Nagle would hold
+      // a response header back waiting for the body.
+      noDelay: true,
+    });
     this.server.on('request', (req, res) => this.guard(this.onRequest(req, res), res));
     this.server.on('upgrade', (req, socket, head) =>
       this.onUpgrade(req, socket, head).catch(() => {
@@ -151,7 +166,6 @@ export class HttpProxy {
     // the tunnel drops; the HTTP client below turns that into the 502 response.
     stream.on('error', () => {});
 
-    const agent = oneShotAgent(stream);
     const headers = forwardHeaders(req, service);
 
     const upstream = http.request(
@@ -160,7 +174,7 @@ export class HttpProxy {
         path: req.url,
         timeout: UPSTREAM_TIMEOUT_MS,
         headers,
-        agent,
+        agent: oneShotAgent(stream),
         // The agent dials the local service itself; these are placeholders that
         // never leave this process.
         host: service.localHost,
@@ -168,8 +182,11 @@ export class HttpProxy {
       },
       (upstreamRes) => {
         const outHeaders: http.OutgoingHttpHeaders = {};
-        for (const [name, value] of Object.entries(upstreamRes.headers)) {
-          if (!HOP_BY_HOP.has(name.toLowerCase()) && value !== undefined) outHeaders[name] = value;
+        const upstreamHeaders = upstreamRes.headers;
+        for (const name in upstreamHeaders) {
+          if (HOP_BY_HOP.has(name)) continue;
+          const value = upstreamHeaders[name];
+          if (value !== undefined) outHeaders[name] = value;
         }
         if (this.options.hsts) {
           outHeaders['strict-transport-security'] = 'max-age=31536000';
@@ -181,7 +198,10 @@ export class HttpProxy {
         // not be buffered.
         const status = upstreamRes.statusCode ?? 502;
         const contentType = String(upstreamRes.headers['content-type'] ?? '');
+        const declaredLength = Number(upstreamRes.headers['content-length'] ?? NaN);
         const compress =
+          // Below ~1 KiB gzip costs more CPU and latency than it saves bytes.
+          !(declaredLength >= 0 && declaredLength < GZIP_MIN_BYTES) &&
           /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? '')) &&
           !upstreamRes.headers['content-encoding'] &&
           !/text\/event-stream/i.test(contentType) &&
@@ -195,7 +215,7 @@ export class HttpProxy {
           outHeaders['content-encoding'] = 'gzip';
           outHeaders.vary = outHeaders.vary ? `${String(outHeaders.vary)}, Accept-Encoding` : 'Accept-Encoding';
           writeHead(res, status, outHeaders);
-          const gzip = zlib.createGzip();
+          const gzip = zlib.createGzip(GZIP_OPTIONS);
           gzip.on('error', () => res.destroy());
           upstreamRes.pipe(gzip).pipe(res as unknown as NodeJS.WritableStream);
         } else {
@@ -295,7 +315,12 @@ export class HttpProxy {
     stream.pipe(socket);
     socket.pipe(stream);
 
+    // Both sides fire 'error' and 'close', so without the guard the connection's
+    // bytes were counted into the service's statistics up to four times.
+    let closed = false;
     const cleanup = () => {
+      if (closed) return;
+      closed = true;
       store.recordTraffic(service.id, stream.bytesOut, stream.bytesIn);
       if (!stream.destroyed) stream.destroy();
       if (!socket.destroyed) socket.destroy();
@@ -311,7 +336,6 @@ function writeHead(res: AnyResponse, status: number, headers: http.OutgoingHttpH
   (res as http.ServerResponse).writeHead(status, headers);
 }
 
-/** An http.Agent that hands the client exactly one pre-made connection. */
 function oneShotAgent(stream: TunnelStream): http.Agent {
   const agent = new http.Agent({ keepAlive: false, maxSockets: 1 });
   (agent as unknown as { createConnection: () => unknown }).createConnection = () => stream;
@@ -320,11 +344,16 @@ function oneShotAgent(stream: TunnelStream): http.Agent {
 
 function forwardHeaders(req: AnyRequest, service: ServiceRecord): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
-  for (const [name, value] of Object.entries(req.headers)) {
+  const incoming = req.headers;
+  // Node lower-cases incoming header names on both protocols, so no per-header
+  // allocation is needed here — and `for..in` avoids materialising the entries.
+  for (const name in incoming) {
     // `:method`, `:path`, `:scheme`, `:authority` are HTTP/2 pseudo-headers and are
     // rejected by an HTTP/1.1 client, so they are translated rather than copied.
-    if (name.startsWith(':')) continue;
-    if (!HOP_BY_HOP.has(name.toLowerCase()) && value !== undefined) headers[name] = value;
+    if (name.charCodeAt(0) === 58 /* ':' */) continue;
+    if (HOP_BY_HOP.has(name)) continue;
+    const value = incoming[name as keyof typeof incoming];
+    if (value !== undefined) headers[name] = value as string | string[];
   }
   const clientIp = remoteIp(req.socket);
   // Set, never append. A visitor can send any X-Forwarded-For they like, and

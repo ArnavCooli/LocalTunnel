@@ -189,3 +189,27 @@ test('hostname validation', () => {
   assert.ok(!isValidHostname('-bad.example.com'));
   assert.ok(!isValidHostname('has space.example.com'));
 });
+
+test('a frame split across many reads is reassembled without quadratic copying', () => {
+  const body = Buffer.alloc(1024 * 1024, 9);
+  const frame = encodeFrame(FrameType.DATA, 7, body);
+  const parser = new FrameParser();
+  const frames = [];
+  for (let offset = 0; offset < frame.length; offset += 1500) {
+    frames.push(...parser.push(frame.subarray(offset, Math.min(offset + 1500, frame.length))));
+  }
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].streamId, 7);
+  assert.equal(frames[0].payload.length, body.length);
+  assert.equal(parser.pending, 0);
+
+  // Two frames arriving inside one read are both returned, in order.
+  const pair = Buffer.concat([
+    encodeFrame(FrameType.DATA, 1, Buffer.from('one')),
+    encodeFrame(FrameType.DATA, 3, Buffer.from('two')),
+  ]);
+  const both = new FrameParser().push(pair);
+  assert.equal(both.length, 2);
+  assert.equal(both[0].payload.toString(), 'one');
+  assert.equal(both[1].payload.toString(), 'two');
+});

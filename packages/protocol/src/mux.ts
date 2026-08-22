@@ -4,6 +4,7 @@ import {
   DEFAULT_WINDOW,
   FrameParser,
   FrameType,
+  encodeHeader,
   MAX_CONCURRENT_STREAMS,
   MAX_DATA_CHUNK,
   MAX_STREAM_ID,
@@ -31,6 +32,8 @@ export class TunnelStream extends Duplex {
   private sendWindow = DEFAULT_WINDOW;
   private ungrantedBytes = 0;
   private inbound: Buffer[] = [];
+  /** Read cursor into `inbound`, so draining is not a repeated O(n) shift. */
+  private inboundHead = 0;
   /**
    * Bytes received for which no credit has been handed back yet. Flow control is
    * only a bound on memory if the *receiver* enforces it, so this is checked
@@ -123,9 +126,19 @@ export class TunnelStream extends Duplex {
     this.drainInbound();
   }
 
+  private get queued(): number {
+    return this.inbound.length - this.inboundHead;
+  }
+
   private drainInbound(): void {
-    while (this.flowing && this.inbound.length > 0) {
-      const chunk = this.inbound.shift()!;
+    while (this.flowing && this.inboundHead < this.inbound.length) {
+      const chunk = this.inbound[this.inboundHead];
+      this.inbound[this.inboundHead] = undefined as unknown as Buffer;
+      this.inboundHead += 1;
+      if (this.inboundHead === this.inbound.length) {
+        this.inbound.length = 0;
+        this.inboundHead = 0;
+      }
       const wantsMore = this.push(chunk);
       this.ungrantedBytes += chunk.length;
       if (!wantsMore) {
@@ -140,7 +153,7 @@ export class TunnelStream extends Duplex {
       this.receiveOutstanding = Math.max(0, this.receiveOutstanding - credits);
       if (!this.shutDown) this.mux.sendFrame(FrameType.WINDOW, this.id, credits);
     }
-    if (this.remoteEnded && this.inbound.length === 0) {
+    if (this.remoteEnded && this.queued === 0) {
       this.push(null);
     }
   }
@@ -151,7 +164,7 @@ export class TunnelStream extends Duplex {
     if (reason?.reason) {
       this.emit('remote-close', reason);
     }
-    if (this.inbound.length === 0) this.push(null);
+    if (this.queued === 0) this.push(null);
     this.maybeDestroy();
   }
 
@@ -163,6 +176,10 @@ export class TunnelStream extends Duplex {
   }
 
   override _destroy(err: Error | null, callback: (err: Error | null) => void): void {
+    if (this.timeoutTimer) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = null;
+    }
     if (!this.shutDown) {
       this.shutDown = true;
       const payload: CloseReason | undefined = err ? { reason: err.message } : undefined;
@@ -277,12 +294,26 @@ export class Mux extends EventEmitter {
 
   sendFrame(type: FrameType, streamId: number, payload?: Buffer | number): void {
     if (this.ended) return;
-    let frame: Buffer;
     if (type === FrameType.WINDOW && typeof payload === 'number') {
-      frame = encodeWindowFrame(streamId, payload);
-    } else {
-      frame = encodeFrame(type, streamId, payload as Buffer | undefined);
+      const frame = encodeWindowFrame(streamId, payload);
+      this.bytesOut += frame.length;
+      this.socket.write(frame);
+      return;
     }
+    const body = payload as Buffer | undefined;
+    if (body !== undefined && body.length > 0) {
+      // Header and payload are corked into one write rather than copied into a
+      // single buffer: on a 64 KiB DATA frame that copy was the most expensive
+      // thing on the forwarding path, and the socket still emits one TLS record.
+      const header = encodeHeader(type, streamId, body.length);
+      this.bytesOut += header.length + body.length;
+      this.socket.cork();
+      this.socket.write(header);
+      this.socket.write(body);
+      this.socket.uncork();
+      return;
+    }
+    const frame = encodeFrame(type, streamId, undefined);
     this.bytesOut += frame.length;
     this.socket.write(frame);
   }
@@ -407,7 +438,7 @@ export class Mux extends EventEmitter {
         stream.emit('open-ok');
         break;
       case FrameType.DATA:
-        stream.acceptData(Buffer.from(payload));
+        stream.acceptData(payload);
         break;
       case FrameType.WINDOW:
         if (payload.length !== 4) throw new ProtocolError('WINDOW payload must be 4 bytes');

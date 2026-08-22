@@ -158,6 +158,10 @@ export class IngressServer {
   private onSecureConnection(socket: TLSSocket): void {
     const { log, config, connections } = this.deps;
     const ip = socket.remoteAddress?.replace(/^::ffff:/, '') ?? 'unknown';
+    // Every socket here carries interactive, message-shaped traffic: tunnel
+    // frames, HTTP requests, admin calls. Nagle's algorithm delays each of those
+    // by up to a round trip waiting for more bytes that are not coming.
+    socket.setNoDelay(true);
 
     if (!this.newConnections.allow(ip)) {
       log.warn('connection rate limit', { ip, alpn: socket.alpnProtocol || 'none' });
@@ -187,6 +191,9 @@ export class IngressServer {
 
     switch (socket.alpnProtocol) {
       case ALPN.tunnel:
+        // The OS notices a vanished peer long before the application heartbeat
+        // does, which is what makes a reconnect after a network drop fast.
+        socket.setKeepAlive(true, 15_000);
         this.acceptTunnel(socket, ip);
         return;
       case ALPN.enroll:
@@ -254,9 +261,9 @@ export class IngressServer {
     }, HELLO_TIMEOUT_MS);
     timeout.unref();
 
-    let buffered = Buffer.alloc(0);
+    let buffered: Buffer = Buffer.alloc(0);
     const onData = (chunk: Buffer) => {
-      buffered = Buffer.concat([buffered, chunk]);
+      buffered = buffered.length === 0 ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length) : Buffer.concat([buffered, chunk]);
       if (buffered.length < HEADER_SIZE) return;
 
       const type = buffered.readUInt8(0);

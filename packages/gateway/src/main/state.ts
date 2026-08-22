@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { rename as renameAsync, writeFile as writeFileAsync } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ServiceType } from '@localtunnel/protocol';
 import { newId, newToken } from '@localtunnel/protocol';
@@ -92,6 +93,7 @@ export function sha256(value: string): string {
 }
 
 const ENROLL_TOKEN_TTL_MS = 15 * 60 * 1000;
+const SAVE_COALESCE_MS = 2000;
 
 /**
  * The gateway's own source of truth. Deliberately a plain JSON file: the gateway
@@ -102,6 +104,18 @@ export class Store {
   private state: StateShape;
   private readonly path: string;
   private saveScheduled = false;
+  private saving: Promise<void> | null = null;
+  /*
+   * Every public request resolves a service by hostname, port or id. A linear
+   * scan (with a toLowerCase per candidate) sat on that path; these indexes make
+   * it a hash lookup and are rebuilt whenever the service list changes.
+   */
+  private byId = new Map<string, ServiceRecord>();
+  private byHostname = new Map<string, ServiceRecord>();
+  private byPublicPort = new Map<number, ServiceRecord>();
+  private byMachine = new Map<string, ServiceRecord[]>();
+  private machinesById = new Map<string, MachineRecord>();
+  private revokedSerials = new Set<string>();
 
   constructor(dataDir: string) {
     this.path = join(dataDir, 'state.json');
@@ -110,6 +124,27 @@ export class Store {
     // this covers the case where the gateway is run outside it.
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     this.state = this.read();
+    this.reindex();
+  }
+
+  /** Rebuild the lookup tables. Called after any change to machines or services. */
+  private reindex(): void {
+    this.byId.clear();
+    this.byHostname.clear();
+    this.byPublicPort.clear();
+    this.byMachine.clear();
+    this.machinesById.clear();
+    this.revokedSerials = new Set(this.state.revokedSerials);
+    for (const machine of this.state.machines) this.machinesById.set(machine.id, machine);
+    for (const service of this.state.services) {
+      this.byId.set(service.id, service);
+      const siblings = this.byMachine.get(service.machineId);
+      if (siblings) siblings.push(service);
+      else this.byMachine.set(service.machineId, [service]);
+      if (!service.enabled) continue;
+      if (service.hostname) this.byHostname.set(service.hostname.toLowerCase(), service);
+      if (service.publicPort !== null) this.byPublicPort.set(service.publicPort, service);
+    }
   }
 
   private read(): StateShape {
@@ -129,17 +164,36 @@ export class Store {
     this.saveScheduled = false;
   }
 
-  /** Coalesce the frequent small writes (counters, lastSeen) into one per second. */
+  /**
+   * Coalesce the frequent small writes (counters, lastSeen) into one every few
+   * seconds, off the event loop. These are statistics: losing the last couple of
+   * seconds of them to a crash costs nothing, while a synchronous whole-state
+   * write on the forwarding path costs every request behind it.
+   */
   saveSoon(): void {
     if (this.saveScheduled) return;
     this.saveScheduled = true;
     setTimeout(() => {
+      this.saveScheduled = false;
+      void this.saveAsync();
+    }, SAVE_COALESCE_MS).unref();
+  }
+
+  private async saveAsync(): Promise<void> {
+    if (this.saving) return this.saving;
+    const tmp = `${this.path}.tmp`;
+    const body = JSON.stringify(this.state, null, 2);
+    this.saving = (async () => {
       try {
-        this.save();
+        await writeFileAsync(tmp, body, { mode: 0o600 });
+        await renameAsync(tmp, this.path);
       } catch {
-        this.saveScheduled = false;
+        /* a failed statistics flush is retried by the next one */
+      } finally {
+        this.saving = null;
       }
-    }, 1000).unref();
+    })();
+    return this.saving;
   }
 
   /* -------------------------------------------------------------- machines */
@@ -149,11 +203,12 @@ export class Store {
   }
 
   machine(id: string): MachineRecord | undefined {
-    return this.state.machines.find((m) => m.id === id);
+    return this.machinesById.get(id);
   }
 
   addMachine(machine: MachineRecord): void {
     this.state.machines.push(machine);
+    this.reindex();
     this.save();
   }
 
@@ -167,6 +222,7 @@ export class Store {
     }
     // A revoked machine's services stop being routable immediately.
     for (const service of this.servicesForMachine(id)) service.enabled = false;
+    this.reindex();
     this.save();
     return machine;
   }
@@ -175,11 +231,12 @@ export class Store {
     this.revokeMachine(id);
     this.state.services = this.state.services.filter((s) => s.machineId !== id);
     this.state.machines = this.state.machines.filter((m) => m.id !== id);
+    this.reindex();
     this.save();
   }
 
   isSerialRevoked(serial: string): boolean {
-    return this.state.revokedSerials.includes(serial);
+    return this.revokedSerials.has(serial);
   }
 
   touchMachine(id: string): void {
@@ -196,20 +253,19 @@ export class Store {
   }
 
   service(id: string): ServiceRecord | undefined {
-    return this.state.services.find((s) => s.id === id);
+    return this.byId.get(id);
   }
 
   servicesForMachine(machineId: string): ServiceRecord[] {
-    return this.state.services.filter((s) => s.machineId === machineId);
+    return this.byMachine.get(machineId) ?? [];
   }
 
   serviceByHostname(hostname: string): ServiceRecord | undefined {
-    const needle = hostname.toLowerCase();
-    return this.state.services.find((s) => s.enabled && s.hostname?.toLowerCase() === needle);
+    return this.byHostname.get(hostname.toLowerCase());
   }
 
   serviceByPublicPort(port: number): ServiceRecord | undefined {
-    return this.state.services.find((s) => s.enabled && s.publicPort === port);
+    return this.byPublicPort.get(port);
   }
 
   addService(record: Omit<ServiceRecord, 'id' | 'createdAt' | 'stats'>): ServiceRecord {
@@ -220,6 +276,7 @@ export class Store {
       stats: emptyStats(),
     };
     this.state.services.push(service);
+    this.reindex();
     this.save();
     return service;
   }
@@ -228,6 +285,7 @@ export class Store {
     const service = this.service(id);
     if (!service) return undefined;
     Object.assign(service, patch);
+    this.reindex();
     this.save();
     return service;
   }
@@ -236,7 +294,10 @@ export class Store {
     const before = this.state.services.length;
     this.state.services = this.state.services.filter((s) => s.id !== id);
     const removed = this.state.services.length !== before;
-    if (removed) this.save();
+    if (removed) {
+      this.reindex();
+      this.save();
+    }
     return removed;
   }
 
@@ -247,7 +308,9 @@ export class Store {
     );
     if (expired.length === 0) return [];
     const ids = expired.map((s) => s.id);
-    this.state.services = this.state.services.filter((s) => !ids.includes(s.id));
+    const doomed = new Set(ids);
+    this.state.services = this.state.services.filter((s) => !doomed.has(s.id));
+    this.reindex();
     this.save();
     return ids;
   }
